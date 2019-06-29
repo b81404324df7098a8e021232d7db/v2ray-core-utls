@@ -6,6 +6,8 @@ package dns
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,9 +61,23 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 	server.hosts = hosts
 
 	addNameServer := func(endpoint *net.Endpoint) int {
+
 		address := endpoint.Address.AsAddress()
 		if address.Family().IsDomain() && address.Domain() == "localhost" {
 			server.clients = append(server.clients, NewLocalNameServer())
+		} else if address.Family().IsDomain() && strings.HasPrefix(address.Domain(), "DOH_") {
+			dohHost := address.Domain()[4:]
+			dest, err := net.ParseDestination(fmt.Sprintf("tcp:%s:443", dohHost))
+			if err != nil {
+				return 0
+			}
+
+			idx := len(server.clients)
+			server.clients = append(server.clients, nil)
+
+			common.Must(core.RequireFeatures(ctx, func(d routing.Dispatcher) {
+				server.clients[idx] = NewDOHClient(dest, d, server.clientIP)
+			}))
 		} else {
 			dest := endpoint.AsDestination()
 			if dest.Network == net.Network_Unknown {
