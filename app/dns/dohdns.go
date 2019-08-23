@@ -65,7 +65,6 @@ type dohPendingRequest struct {
 type DOHClient struct {
 	sync.RWMutex
 	resolver doh.Resolver
-	timeout  time.Duration
 
 	dnsResult map[string]*dohDNSResult
 	pending   map[string]*dohPendingRequest
@@ -113,7 +112,7 @@ func (c *DOHClient) lookupIPv4(ctx context.Context, host string) (*dohIPRecord, 
 		ips:    resolvedIPs,
 		expire: time.Now().Add(time.Duration(int64(ttl)) * time.Second),
 	}
-	newError("DOH lookupIPv4 ", host, " ", ret.ips).AtDebug().WriteToLog()
+	newError("DOH lookupIPv4 ", host, " ", ret.ips).AtWarning().WriteToLog()
 	return ret, nil
 }
 
@@ -144,7 +143,7 @@ func (c *DOHClient) lookupIPv6(ctx context.Context, host string) (*dohIPRecord, 
 		ips:    resolvedIPs,
 		expire: time.Now().Add(time.Duration(int64(ttl)) * time.Second),
 	}
-	newError("DOH lookupIPv6 ", host, " ", ret.ips).AtDebug().WriteToLog()
+	newError("DOH lookupIPv6 ", host, " ", ret.ips).AtWarning().WriteToLog()
 
 	return ret, nil
 }
@@ -158,7 +157,7 @@ func (c *DOHClient) getCache(domain string, option IPOption) ([]net.IP, error) {
 	if cok {
 		ips := rr.getIPs(option)
 		if len(ips) > 0 {
-			newError("DOH Cache HIT ", domain, " ", ips).AtDebug().WriteToLog()
+			newError("DOH Cache HIT ", domain, " ", ips).AtWarning().WriteToLog()
 			return ips, nil
 		}
 	}
@@ -234,7 +233,7 @@ func (c *DOHClient) QueryIP(ctx context.Context, domain string, option IPOption)
 	}
 
 	// pending, wait until cache is ready
-	newError("DOH pending wait ", domain).AtDebug().WriteToLog()
+	newError("DOH pending wait ", domain).AtWarning().WriteToLog()
 	<-pp.done
 	if rec, err := c.getCache(domain, option); err == nil {
 		return rec, nil
@@ -260,7 +259,7 @@ func (c *DOHClient) Cleanup() error {
 		}
 		if record.A == nil && record.AAAA == nil {
 			delete(c.dnsResult, domain)
-			newError("DOH cache expired cleaned up ", domain).AtDebug().WriteToLog()
+			newError("DOH cache expired cleaned up ", domain).AtWarning().WriteToLog()
 		}
 	}
 
@@ -293,16 +292,17 @@ func NewDOHClient(address net.Destination, dispatcher routing.Dispatcher, client
 		if err != nil {
 			return nil, err
 		}
-		readerOpt := net.ConnectionOutputMulti(r.Reader)
-		return net.NewConnection(net.ConnectionInputMulti(r.Writer), readerOpt), nil
+		return net.NewConnection(
+			net.ConnectionInputMulti(r.Writer),
+			net.ConnectionOutputMulti(r.Reader),
+		), nil
 	}
 
 	tr := &http.Transport{
-		DialContext:           dial,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+		DialContext:         dial,
+		MaxIdleConns:        100,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
 	}
 
 	httpClient := &http.Client{
@@ -316,7 +316,6 @@ func NewDOHClient(address net.Destination, dispatcher routing.Dispatcher, client
 			Class:      doh.IN,
 			HTTPClient: httpClient,
 		},
-		timeout:   30 * time.Second,
 		dnsResult: make(map[string]*dohDNSResult),
 		pending:   make(map[string]*dohPendingRequest),
 	}
