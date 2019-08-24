@@ -4,6 +4,7 @@ package dns
 
 import (
 	"context"
+	goerr "errors"
 	"sync"
 	"time"
 
@@ -89,6 +90,8 @@ func (c *DOHClient) lookupIPv4(ctx context.Context, host string) (*dohIPRecord, 
 	var ttl uint32 = 600
 	resolvedIPs := make([]net.IP, 0)
 	var max = 3
+	var lastErr error
+
 	for max > 0 {
 		max--
 		r, ttls, err := c.resolver.LookupA(ctx, host)
@@ -97,7 +100,8 @@ func (c *DOHClient) lookupIPv4(ctx context.Context, host string) (*dohIPRecord, 
 			return nil, err
 		}
 		if err != nil {
-			if ctx.Err() != nil {
+			lastErr = err
+			if err == context.Canceled || err == context.DeadlineExceeded {
 				newError("DOH LookupIPv4 context err: ", host).Base(err).AtWarning().WriteToLog()
 				return nil, err
 			}
@@ -117,14 +121,13 @@ func (c *DOHClient) lookupIPv4(ctx context.Context, host string) (*dohIPRecord, 
 	}
 
 	if len(resolvedIPs) == 0 {
-		return nil, dns.ErrEmptyResponse
+		return nil, lastErr
 	}
 
 	ret := &dohIPRecord{
 		ips:    resolvedIPs,
 		expire: time.Now().Add(time.Duration(int64(ttl)) * time.Second),
 	}
-	newError("DOH lookupIPv4 ", host, " ", ret.ips).AtWarning().WriteToLog()
 	return ret, nil
 }
 
@@ -132,6 +135,7 @@ func (c *DOHClient) lookupIPv6(ctx context.Context, host string) (*dohIPRecord, 
 	var ttl uint32 = 600
 	resolvedIPs := make([]net.IP, 0)
 	max := 3
+	var lastErr error
 	for max > 0 {
 		max--
 		r, ttls, err := c.resolver.LookupAAAA(ctx, host)
@@ -140,7 +144,8 @@ func (c *DOHClient) lookupIPv6(ctx context.Context, host string) (*dohIPRecord, 
 			return nil, err
 		}
 		if err != nil {
-			if ctx.Err() != nil {
+			lastErr = err
+			if err == context.Canceled || err == context.DeadlineExceeded {
 				newError("DOH LookupIPv6 context err: ", host).Base(err).AtWarning().WriteToLog()
 				return nil, err
 			}
@@ -160,15 +165,13 @@ func (c *DOHClient) lookupIPv6(ctx context.Context, host string) (*dohIPRecord, 
 	}
 
 	if len(resolvedIPs) == 0 {
-		return nil, dns.ErrEmptyResponse
+		return nil, lastErr
 	}
 
 	ret := &dohIPRecord{
 		ips:    resolvedIPs,
 		expire: time.Now().Add(time.Duration(int64(ttl)) * time.Second),
 	}
-	newError("DOH lookupIPv6 ", host, " ", ret.ips).AtWarning().WriteToLog()
-
 	return ret, nil
 }
 
@@ -191,12 +194,14 @@ func (c *DOHClient) getCache(domain string, option IPOption) ([]net.IP, error) {
 func (c *DOHClient) dohLookup(ctx context.Context, domain string, option IPOption) (*dohDNSResult, error) {
 
 	record := &dohDNSResult{domain: domain}
+	var lastErr error
 
 	if option.IPv4Enable {
 		rec, err := c.lookupIPv4(ctx, domain)
 		if err == nil {
 			record.A = rec
 		}
+		lastErr = err
 	}
 
 	if option.IPv6Enable {
@@ -204,34 +209,44 @@ func (c *DOHClient) dohLookup(ctx context.Context, domain string, option IPOptio
 		if err == nil {
 			record.AAAA = rec
 		}
+		lastErr = err
 	}
 
 	if record.A != nil || record.AAAA != nil {
 		return record, nil
 	}
-	return nil, dns.ErrEmptyResponse
+	if lastErr == nil {
+		return nil, dns.ErrEmptyResponse
+	}
+	return nil, lastErr
 }
 
 func (c *DOHClient) dohLookupDual(ctx context.Context, domain string) (*dohDNSResult, error) {
 	record := &dohDNSResult{domain: domain}
 	var wg sync.WaitGroup
+	var errmu sync.Mutex
+	lastErr := goerr.New("DOH Lookup")
 	wg.Add(2)
 	go func() {
-		_ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
-		defer cancel()
-		rec, err := c.lookupIPv4(_ctx, domain)
+		rec, err := c.lookupIPv4(ctx, domain)
 		if err == nil {
 			record.A = rec
+		} else {
+			errmu.Lock()
+			lastErr = goerr.New(lastErr.Error() + " > " + err.Error())
+			errmu.Unlock()
 		}
 		wg.Done()
 	}()
 
 	go func() {
-		_ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
-		defer cancel()
-		rec, err := c.lookupIPv6(_ctx, domain)
+		rec, err := c.lookupIPv6(ctx, domain)
 		if err == nil {
 			record.AAAA = rec
+		} else {
+			errmu.Lock()
+			lastErr = goerr.New(lastErr.Error() + " > " + err.Error())
+			errmu.Unlock()
 		}
 		wg.Done()
 	}()
@@ -240,7 +255,7 @@ func (c *DOHClient) dohLookupDual(ctx context.Context, domain string) (*dohDNSRe
 	if record.A != nil || record.AAAA != nil {
 		return record, nil
 	}
-	return nil, dns.ErrEmptyResponse
+	return nil, lastErr
 }
 
 func (c *DOHClient) QueryIP(ctx context.Context, domain string, option IPOption) ([]net.IP, error) {
@@ -254,56 +269,59 @@ func (c *DOHClient) QueryIP(ctx context.Context, domain string, option IPOption)
 	pp, pok := c.pending[domain]
 	c.RUnlock()
 
-	if !pok {
-		// not in pending, do resolve
-		c.Lock()
-
-		// mark the pending request
-		c.pending[domain] = &dohPendingRequest{
-			expire: time.Now().Add(time.Second * 10),
-			done:   make(chan struct{}),
+	if pok {
+		// is pending, wait until cache is ready
+		newError("DOH pending wait ", domain).AtWarning().WriteToLog()
+		<-pp.done
+		if rec, err := c.getCache(domain, option); err == nil {
+			return rec, nil
 		}
-		c.Unlock()
-
-		start := time.Now()
-		// do resolve
-		var rec *dohDNSResult
-		var err error
-		if option.IPv4Enable && option.IPv6Enable {
-			rec, err = c.dohLookupDual(ctx, domain)
-		} else {
-			rec, err = c.dohLookup(ctx, domain, option)
-		}
-		elapsed := time.Since(start)
-		newError("DOH resolve time ", domain, " ", elapsed).AtWarning().WriteToLog()
-
-		c.Lock()
-		if err == nil && rec != nil {
-			// result ok, set cache
-			c.dnsResult[domain] = rec
-		}
-
-		// clear pending status
-		p := c.pending[domain]
-		close(p.done)
-		delete(c.pending, domain)
-		c.Unlock()
-
-		if rec != nil {
-			common.Must(c.cleanup.Start())
-			return rec.getIPs(option), nil
-		}
-
 		return nil, dns.ErrEmptyResponse
 	}
 
-	// pending, wait until cache is ready
-	newError("DOH pending wait ", domain).AtWarning().WriteToLog()
-	<-pp.done
-	if rec, err := c.getCache(domain, option); err == nil {
-		return rec, nil
+	// mark the pending request
+	c.Lock()
+	c.pending[domain] = &dohPendingRequest{
+		expire: time.Now().Add(time.Second * 10),
+		done:   make(chan struct{}),
 	}
-	return nil, dns.ErrEmptyResponse
+	c.Unlock()
+
+	// not in pending, do resolve
+	start := time.Now()
+	var rec *dohDNSResult
+	var lerr error
+	if option.IPv4Enable && option.IPv6Enable {
+		rec, lerr = c.dohLookupDual(ctx, domain)
+	} else {
+		rec, lerr = c.dohLookup(ctx, domain, option)
+	}
+	elapsed := time.Since(start)
+
+	c.Lock()
+	if lerr == nil && rec != nil {
+		// result ok, set cache
+		c.dnsResult[domain] = rec
+	}
+
+	// clear pending status
+	p := c.pending[domain]
+	close(p.done)
+	delete(c.pending, domain)
+	c.Unlock()
+
+	if rec != nil {
+		ips := rec.getIPs(option)
+		newError("DOH resolve time ", domain, " ", elapsed, " ", ips).AtWarning().WriteToLog()
+		common.Must(c.cleanup.Start())
+		return ips, nil
+	}
+
+	newError("DOH resolve error ", domain, " ", elapsed, " ", lerr).AtWarning().WriteToLog()
+	if lerr == nil {
+		return nil, dns.ErrEmptyResponse
+	}
+	return nil, lerr
 }
 
 func (c *DOHClient) Cleanup() error {
