@@ -88,20 +88,32 @@ func (*DOHClient) Close() error { return nil }
 func (c *DOHClient) lookupIPv4(ctx context.Context, host string) (*dohIPRecord, error) {
 	var ttl uint32 = 600
 	resolvedIPs := make([]net.IP, 0)
-
-	r, ttls, err := c.resolver.LookupA(ctx, host)
-	if err != nil {
-		newError("DOH LookupIPv4 error: ", host).Base(err).AtWarning().WriteToLog()
-		return nil, err
-	}
-	for idx, ip := range r {
-		ip := net.ParseIP(ip.IP4)
-		if ip != nil {
-			resolvedIPs = append(resolvedIPs, ip)
+	var max = 3
+	for max > 0 {
+		max--
+		r, ttls, err := c.resolver.LookupA(ctx, host)
+		if isDOHServerError(err) {
+			newError("DOH LookupIPv4 serverErr: ", host).Base(err).AtWarning().WriteToLog()
+			return nil, err
 		}
-		if ttls[idx] > ttl {
-			ttl = ttls[idx]
+		if err != nil {
+			if ctx.Err() != nil {
+				newError("DOH LookupIPv4 context err: ", host).Base(err).AtWarning().WriteToLog()
+				return nil, err
+			}
+			newError("DOH LookupIPv4 retry: ", host, "  ", max).Base(err).AtWarning().WriteToLog()
+			continue
 		}
+		for idx, ip := range r {
+			ip := net.ParseIP(ip.IP4)
+			if ip != nil {
+				resolvedIPs = append(resolvedIPs, ip)
+			}
+			if ttls[idx] > ttl {
+				ttl = ttls[idx]
+			}
+		}
+		break
 	}
 
 	if len(resolvedIPs) == 0 {
@@ -119,20 +131,32 @@ func (c *DOHClient) lookupIPv4(ctx context.Context, host string) (*dohIPRecord, 
 func (c *DOHClient) lookupIPv6(ctx context.Context, host string) (*dohIPRecord, error) {
 	var ttl uint32 = 600
 	resolvedIPs := make([]net.IP, 0)
-
-	r, ttls, err := c.resolver.LookupAAAA(ctx, host)
-	if err != nil {
-		newError("DOH LookupIPv6 error: ", host).Base(err).AtWarning().WriteToLog()
-		return nil, err
-	}
-	for idx, ip := range r {
-		ip := net.ParseIP(ip.IP6)
-		if ip != nil {
-			resolvedIPs = append(resolvedIPs, ip)
+	max := 3
+	for max > 0 {
+		max--
+		r, ttls, err := c.resolver.LookupAAAA(ctx, host)
+		if isDOHServerError(err) {
+			newError("DOH LookupIPv6 serverErr: ", host).Base(err).AtWarning().WriteToLog()
+			return nil, err
 		}
-		if ttls[idx] > ttl {
-			ttl = ttls[idx]
+		if err != nil {
+			if ctx.Err() != nil {
+				newError("DOH LookupIPv6 context err: ", host).Base(err).AtWarning().WriteToLog()
+				return nil, err
+			}
+			newError("DOH LookupIPv6 retry: ", host, " ", max).Base(err).AtWarning().WriteToLog()
+			continue
 		}
+		for idx, ip := range r {
+			ip := net.ParseIP(ip.IP6)
+			if ip != nil {
+				resolvedIPs = append(resolvedIPs, ip)
+			}
+			if ttls[idx] > ttl {
+				ttl = ttls[idx]
+			}
+		}
+		break
 	}
 
 	if len(resolvedIPs) == 0 {
@@ -188,6 +212,37 @@ func (c *DOHClient) dohLookup(ctx context.Context, domain string, option IPOptio
 	return nil, dns.ErrEmptyResponse
 }
 
+func (c *DOHClient) dohLookupDual(ctx context.Context, domain string) (*dohDNSResult, error) {
+	record := &dohDNSResult{domain: domain}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		_ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		rec, err := c.lookupIPv4(_ctx, domain)
+		if err == nil {
+			record.A = rec
+		}
+		wg.Done()
+	}()
+
+	go func() {
+		_ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		rec, err := c.lookupIPv6(_ctx, domain)
+		if err == nil {
+			record.AAAA = rec
+		}
+		wg.Done()
+	}()
+
+	wg.Wait()
+	if record.A != nil || record.AAAA != nil {
+		return record, nil
+	}
+	return nil, dns.ErrEmptyResponse
+}
+
 func (c *DOHClient) QueryIP(ctx context.Context, domain string, option IPOption) ([]net.IP, error) {
 
 	if rec, err := c.getCache(domain, option); err == nil {
@@ -211,7 +266,14 @@ func (c *DOHClient) QueryIP(ctx context.Context, domain string, option IPOption)
 		c.Unlock()
 
 		// do resolve
-		rec, err := c.dohLookup(ctx, domain, option)
+		var rec *dohDNSResult
+		var err error
+		if option.IPv4Enable && option.IPv6Enable {
+			rec, err = c.dohLookupDual(ctx, domain)
+		} else {
+			rec, err = c.dohLookup(ctx, domain, option)
+		}
+
 		c.Lock()
 		if err == nil && rec != nil {
 			// result ok, set cache
@@ -324,4 +386,12 @@ func NewDOHClient(address net.Destination, dispatcher routing.Dispatcher, client
 		Execute:  c.Cleanup,
 	}
 	return c
+}
+
+func isDOHServerError(err error) bool {
+	switch err {
+	case doh.ErrFormatError, doh.ErrServerFailure, doh.ErrNameError, doh.ErrNotImplemented, doh.ErrRefused:
+		return true
+	}
+	return false
 }
