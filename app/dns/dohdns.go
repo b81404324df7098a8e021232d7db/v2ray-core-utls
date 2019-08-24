@@ -368,7 +368,7 @@ func (c *DOHClient) Name() string {
 }
 
 // New create a new dns.Client
-func NewDOHClient(address net.Destination, dispatcher routing.Dispatcher, clientIP net.IP) *DOHClient {
+func NewDOHClient(address net.Destination, dohHost string, dispatcher routing.Dispatcher, clientIP net.IP) *DOHClient {
 
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		r, err := dispatcher.Dispatch(ctx, address)
@@ -395,7 +395,7 @@ func NewDOHClient(address net.Destination, dispatcher routing.Dispatcher, client
 
 	c := &DOHClient{
 		resolver: doh.Resolver{
-			Host:       address.NetAddr(),
+			Host:       dohHost,
 			Class:      doh.IN,
 			HTTPClient: httpClient,
 		},

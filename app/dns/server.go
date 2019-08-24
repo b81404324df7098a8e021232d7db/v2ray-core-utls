@@ -7,6 +7,7 @@ package dns
 import (
 	"context"
 	"fmt"
+	gonet "net"
 	"strings"
 	"sync"
 	"time"
@@ -66,17 +67,32 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 		if address.Family().IsDomain() && address.Domain() == "localhost" {
 			server.clients = append(server.clients, NewLocalNameServer())
 		} else if address.Family().IsDomain() && strings.HasPrefix(address.Domain(), "DOH_") {
+			// DOH_ prefix makes net.Address think it's a domain
+			// need to process the real address here.
 			dohHost := address.Domain()[4:]
-			dest, err := net.ParseDestination(fmt.Sprintf("tcp:%s:443", dohHost))
+			dohAddr := net.ParseAddress(dohHost)
+			dohIP := dohHost
+
+			if dohAddr.Family().IsDomain() {
+				// resolve DOH server in advance
+				ips, err := gonet.LookupIP(dohAddr.Domain())
+				if err != nil || len(ips) == 0 {
+					return 0
+				}
+				dohIP = ips[0].String()
+			}
+
+			// rfc8484, DOH service only use port 443
+			dohdest, err := net.ParseDestination(fmt.Sprintf("tcp:%s:443", dohIP))
 			if err != nil {
 				return 0
 			}
 
+			// need the core dispatcher, register DOHClient at callback
 			idx := len(server.clients)
 			server.clients = append(server.clients, nil)
-
 			common.Must(core.RequireFeatures(ctx, func(d routing.Dispatcher) {
-				server.clients[idx] = NewDOHClient(dest, d, server.clientIP)
+				server.clients[idx] = NewDOHClient(dohdest, dohHost, d, server.clientIP)
 			}))
 		} else {
 			dest := endpoint.AsDestination()
