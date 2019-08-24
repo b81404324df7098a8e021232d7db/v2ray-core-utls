@@ -217,7 +217,7 @@ func (c *DOHClient) dohLookupDual(ctx context.Context, domain string) (*dohDNSRe
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
-		_ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		_ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		defer cancel()
 		rec, err := c.lookupIPv4(_ctx, domain)
 		if err == nil {
@@ -227,7 +227,7 @@ func (c *DOHClient) dohLookupDual(ctx context.Context, domain string) (*dohDNSRe
 	}()
 
 	go func() {
-		_ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		_ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		defer cancel()
 		rec, err := c.lookupIPv6(_ctx, domain)
 		if err == nil {
@@ -265,6 +265,7 @@ func (c *DOHClient) QueryIP(ctx context.Context, domain string, option IPOption)
 		}
 		c.Unlock()
 
+		start := time.Now()
 		// do resolve
 		var rec *dohDNSResult
 		var err error
@@ -273,6 +274,8 @@ func (c *DOHClient) QueryIP(ctx context.Context, domain string, option IPOption)
 		} else {
 			rec, err = c.dohLookup(ctx, domain, option)
 		}
+		elapsed := time.Since(start)
+		newError("DOH resolve time ", domain, " ", elapsed).AtWarning().WriteToLog()
 
 		c.Lock()
 		if err == nil && rec != nil {
