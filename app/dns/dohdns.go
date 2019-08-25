@@ -373,7 +373,7 @@ func (c *DOHClient) Cleanup() error {
 }
 
 func (c *DOHClient) Name() string {
-	return "dohdns:" + c.DohHost
+	return "DOH:" + c.DohHost
 }
 
 // New create a new dns.Client
