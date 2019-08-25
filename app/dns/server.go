@@ -7,7 +7,6 @@ package dns
 import (
 	"context"
 	"fmt"
-	gonet "net"
 	"strings"
 	"sync"
 	"time"
@@ -75,7 +74,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 
 			if dohAddr.Family().IsDomain() {
 				// resolve DOH server in advance
-				ips, err := gonet.LookupIP(dohAddr.Domain())
+				ips, err := net.LookupIP(dohAddr.Domain())
 				if err != nil || len(ips) == 0 {
 					return 0
 				}
