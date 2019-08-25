@@ -67,6 +67,7 @@ type dohPendingRequest struct {
 type DOHClient struct {
 	sync.RWMutex
 	resolver doh.Resolver
+	DohHost  string
 
 	dnsResult map[string]*dohDNSResult
 	pending   map[string]*dohPendingRequest
@@ -372,7 +373,7 @@ func (c *DOHClient) Cleanup() error {
 }
 
 func (c *DOHClient) Name() string {
-	return "dohdns"
+	return "dohdns:" + c.DohHost
 }
 
 // New create a new dns.Client
@@ -407,6 +408,7 @@ func NewDOHClient(address net.Destination, dohHost string, dispatcher routing.Di
 			Class:      doh.IN,
 			HTTPClient: httpClient,
 		},
+		DohHost:   dohHost,
 		dnsResult: make(map[string]*dohDNSResult),
 		pending:   make(map[string]*dohPendingRequest),
 	}
