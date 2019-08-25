@@ -3,381 +3,44 @@
 package dns
 
 import (
+	"bytes"
 	"context"
-	goerr "errors"
+	"encoding/binary"
+	"fmt"
+	"io/ioutil"
+	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
 	"v2ray.com/core/common"
-	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/net"
+	"v2ray.com/core/common/protocol/dns"
+	"v2ray.com/core/common/session"
+	"v2ray.com/core/common/signal/pubsub"
 	"v2ray.com/core/common/task"
-	"v2ray.com/core/features/dns"
+	dns_feature "v2ray.com/core/features/dns"
 	"v2ray.com/core/features/routing"
-
-	"net/http"
-
-	doh "github.com/vcptr/go-doh-client"
 )
 
-var (
-	dohCacheNotFound = errors.New("DoH Cache Not Found")
-	dohCacheExpired  = errors.New("DoH Cache Expired")
-)
-
-type dohIPRecord struct {
-	ips    []net.IP
-	expire time.Time
-}
-
-type dohDNSResult struct {
-	domain string
-	A      *dohIPRecord
-	AAAA   *dohIPRecord
-}
-
-func (r *dohDNSResult) getIPs(option IPOption) []net.IP {
-	resolvedIPs := make([]net.IP, 0)
-	now := time.Now()
-	if option.IPv6Enable && r.AAAA != nil {
-		if r.AAAA.expire.After(now) {
-			resolvedIPs = append(resolvedIPs, r.AAAA.ips...)
-		} else {
-			newError("DOH Cache Expired IPv6 ", r.domain).AtWarning().WriteToLog()
-		}
-	}
-
-	if option.IPv4Enable && r.A != nil {
-		if r.A.expire.After(now) {
-			resolvedIPs = append(resolvedIPs, r.A.ips...)
-		} else {
-			newError("DOH Cache Expired IPv4 ", r.domain).AtWarning().WriteToLog()
-		}
-	}
-	return resolvedIPs
-}
-
-type dohPendingRequest struct {
-	expire time.Time
-	done   chan struct{}
-}
-
-// Client is an implementation of dns.Client, which queries localhost for DNS.
-type DOHClient struct {
+type DoHNameServer struct {
 	sync.RWMutex
-	resolver doh.Resolver
-	name     string
-
-	dnsResult map[string]*dohDNSResult
-	pending   map[string]*dohPendingRequest
-
-	clientIP net.IP
-	cleanup  *task.Periodic
+	address     net.Destination
+	ips         map[string]record
+	requests    map[uint16]pendingRequest
+	pendingWait map[string]struct{}
+	pub         *pubsub.Service
+	cleanup     *task.Periodic
+	reqID       uint32
+	clientIP    net.IP
+	httpClient  *http.Client
+	dohHost     string
+	name        string
 }
 
-// Type implements common.HasType.
-func (*DOHClient) Type() interface{} {
-	return dns.ClientType()
-}
-
-// Start implements common.Runnable.
-func (*DOHClient) Start() error { return nil }
-
-// Close implements common.Closable.
-func (*DOHClient) Close() error { return nil }
-
-// LookupIPv4 implements IPv4Lookup.
-func (c *DOHClient) lookupIPv4(ctx context.Context, host string) (*dohIPRecord, error) {
-	var ttl uint32 = 600
-	resolvedIPs := make([]net.IP, 0)
-	var max = 3
-	var lastErr error
-
-	for max > 0 {
-		max--
-		r, ttls, err := c.resolver.LookupA(ctx, host)
-		if isDOHServerError(err) {
-			newError("DOH LookupIPv4 serverErr: ", host).Base(err).AtWarning().WriteToLog()
-			return nil, err
-		}
-		if err != nil {
-			lastErr = err
-			if err == context.Canceled || err == context.DeadlineExceeded {
-				newError("DOH LookupIPv4 context err: ", host).Base(err).AtWarning().WriteToLog()
-				return nil, err
-			}
-			newError("DOH LookupIPv4 retry: ", host, "  ", max).Base(err).AtWarning().WriteToLog()
-			continue
-		}
-		for idx, ip := range r {
-			ip := net.ParseIP(ip.IP4)
-			if ip != nil {
-				resolvedIPs = append(resolvedIPs, ip)
-			}
-			if ttls[idx] > ttl {
-				ttl = ttls[idx]
-			}
-		}
-		break
-	}
-
-	if len(resolvedIPs) == 0 {
-		return nil, lastErr
-	}
-
-	ret := &dohIPRecord{
-		ips:    resolvedIPs,
-		expire: time.Now().Add(time.Duration(int64(ttl)) * time.Second),
-	}
-	return ret, nil
-}
-
-func (c *DOHClient) lookupIPv6(ctx context.Context, host string) (*dohIPRecord, error) {
-	var ttl uint32 = 600
-	resolvedIPs := make([]net.IP, 0)
-	max := 3
-	var lastErr error
-	for max > 0 {
-		max--
-		r, ttls, err := c.resolver.LookupAAAA(ctx, host)
-		if isDOHServerError(err) {
-			newError("DOH LookupIPv6 serverErr: ", host).Base(err).AtWarning().WriteToLog()
-			return nil, err
-		}
-		if err != nil {
-			lastErr = err
-			if err == context.Canceled || err == context.DeadlineExceeded {
-				newError("DOH LookupIPv6 context err: ", host).Base(err).AtWarning().WriteToLog()
-				return nil, err
-			}
-			newError("DOH LookupIPv6 retry: ", host, " ", max).Base(err).AtWarning().WriteToLog()
-			continue
-		}
-		for idx, ip := range r {
-			ip := net.ParseIP(ip.IP6)
-			if ip != nil {
-				resolvedIPs = append(resolvedIPs, ip)
-			}
-			if ttls[idx] > ttl {
-				ttl = ttls[idx]
-			}
-		}
-		break
-	}
-
-	if len(resolvedIPs) == 0 {
-		return nil, lastErr
-	}
-
-	ret := &dohIPRecord{
-		ips:    resolvedIPs,
-		expire: time.Now().Add(time.Duration(int64(ttl)) * time.Second),
-	}
-	return ret, nil
-}
-
-func (c *DOHClient) getCache(domain string, option IPOption) ([]net.IP, error) {
-	// cached result
-	c.RLock()
-	defer c.RUnlock()
-
-	rr, cok := c.dnsResult[domain]
-	if cok {
-		ips := rr.getIPs(option)
-		if len(ips) > 0 {
-			newError("DOH Cache HIT ", domain, " ", ips).AtWarning().WriteToLog()
-			return ips, nil
-		}
-	}
-	return nil, dohCacheNotFound
-}
-
-func (c *DOHClient) dohLookup(ctx context.Context, domain string, option IPOption) (*dohDNSResult, error) {
-
-	record := &dohDNSResult{domain: domain}
-	var lastErr error
-
-	if option.IPv4Enable {
-		rec, err := c.lookupIPv4(ctx, domain)
-		if err == nil {
-			record.A = rec
-		}
-		lastErr = err
-	}
-
-	if option.IPv6Enable {
-		rec, err := c.lookupIPv6(ctx, domain)
-		if err == nil {
-			record.AAAA = rec
-		}
-		lastErr = err
-	}
-
-	if record.A != nil || record.AAAA != nil {
-		return record, nil
-	}
-	if lastErr == nil {
-		return nil, dns.ErrEmptyResponse
-	}
-	return nil, lastErr
-}
-
-func (c *DOHClient) dohLookupDual(ctx context.Context, domain string) (*dohDNSResult, error) {
-	record := &dohDNSResult{domain: domain}
-	var wg sync.WaitGroup
-	var errmu sync.Mutex
-	lastErr := goerr.New("DOH Lookup")
-	wg.Add(2)
-	go func() {
-		rec, err := c.lookupIPv4(ctx, domain)
-		if err == nil {
-			record.A = rec
-		} else {
-			errmu.Lock()
-			lastErr = goerr.New(lastErr.Error() + " > " + err.Error())
-			errmu.Unlock()
-		}
-		wg.Done()
-	}()
-
-	go func() {
-		rec, err := c.lookupIPv6(ctx, domain)
-		if err == nil {
-			record.AAAA = rec
-		} else {
-			errmu.Lock()
-			lastErr = goerr.New(lastErr.Error() + " > " + err.Error())
-			errmu.Unlock()
-		}
-		wg.Done()
-	}()
-
-	wg.Wait()
-	if record.A != nil || record.AAAA != nil {
-		return record, nil
-	}
-	return nil, lastErr
-}
-
-func (c *DOHClient) QueryIP(ctx context.Context, domain string, option IPOption) ([]net.IP, error) {
-
-	// skip domain without any dot(.)
-	if strings.Index(domain, ".") == -1 {
-		return nil, newError("invalid domain name")
-	}
-
-	if rec, err := c.getCache(domain, option); err == nil {
-		return rec, nil
-	}
-
-	// cache missed, check if is pending
-	c.RLock()
-	pp, pok := c.pending[domain]
-	c.RUnlock()
-
-	if pok {
-		// is pending, wait until cache is ready
-		newError("DOH pending wait ", domain).AtWarning().WriteToLog()
-		<-pp.done
-		if rec, err := c.getCache(domain, option); err == nil {
-			return rec, nil
-		}
-		return nil, dns.ErrEmptyResponse
-	}
-
-	// mark the pending request
-	c.Lock()
-	c.pending[domain] = &dohPendingRequest{
-		expire: time.Now().Add(time.Second * 10),
-		done:   make(chan struct{}),
-	}
-	c.Unlock()
-
-	// not in pending, do resolve
-	start := time.Now()
-	var rec *dohDNSResult
-	var lerr error
-	if option.IPv4Enable && option.IPv6Enable {
-		rec, lerr = c.dohLookupDual(ctx, domain)
-	} else {
-		rec, lerr = c.dohLookup(ctx, domain, option)
-	}
-	elapsed := time.Since(start)
-
-	c.Lock()
-	if lerr == nil && rec != nil {
-		// result ok, set cache
-		c.dnsResult[domain] = rec
-	}
-
-	// clear pending status
-	p := c.pending[domain]
-	close(p.done)
-	delete(c.pending, domain)
-	c.Unlock()
-
-	if rec != nil {
-		ips := rec.getIPs(option)
-		newError("DOH resolve time ", domain, " ", elapsed, " ", ips).AtWarning().WriteToLog()
-		common.Must(c.cleanup.Start())
-		return ips, nil
-	}
-
-	newError("DOH resolve error ", domain, " ", elapsed, " ", lerr).AtWarning().WriteToLog()
-	if lerr == nil {
-		return nil, dns.ErrEmptyResponse
-	}
-	return nil, lerr
-}
-
-func (c *DOHClient) Cleanup() error {
-	now := time.Now()
-	c.Lock()
-	defer c.Unlock()
-
-	if len(c.dnsResult) == 0 && len(c.pending) == 0 {
-		return newError("DOH Cleanup: nothing to do. stopping...")
-	}
-
-	for domain, record := range c.dnsResult {
-		if record.A != nil && record.A.expire.Before(now) {
-			record.A = nil
-		}
-		if record.AAAA != nil && record.AAAA.expire.Before(now) {
-			record.A = nil
-		}
-		if record.A == nil && record.AAAA == nil {
-			delete(c.dnsResult, domain)
-			newError("DOH cache expired cleaned up ", domain).AtWarning().WriteToLog()
-		} else {
-			c.dnsResult[domain] = record
-		}
-	}
-
-	if len(c.dnsResult) == 0 {
-		c.dnsResult = make(map[string]*dohDNSResult)
-	}
-
-	for domain, req := range c.pending {
-		if req.expire.Before(now) {
-			delete(c.pending, domain)
-		}
-	}
-
-	if len(c.pending) == 0 {
-		c.pending = make(map[string]*dohPendingRequest)
-	}
-
-	return nil
-}
-
-func (c *DOHClient) Name() string {
-	return c.name
-}
-
-// New create a new dns.Client
-func NewDOHClient(address net.Destination, dohHost string, dispatcher routing.Dispatcher, clientIP net.IP) *DOHClient {
+func NewDoHNameServer(address net.Destination, dohHost string, dispatcher routing.Dispatcher, clientIP net.IP) *DoHNameServer {
 
 	// Dispatched connection will be closed (interupted) after each request
 	// This makes DOH inefficient without a keeped-alive connection
@@ -404,46 +67,454 @@ func NewDOHClient(address net.Destination, dohHost string, dispatcher routing.Di
 		Transport: tr,
 		Timeout:   16 * time.Second,
 	}
-
-	c := &DOHClient{
-		resolver: doh.Resolver{
-			Host:       dohHost,
-			Class:      doh.IN,
-			HTTPClient: httpClient,
-		},
-		name:      "DOH:" + dohHost,
-		dnsResult: make(map[string]*dohDNSResult),
-		pending:   make(map[string]*dohPendingRequest),
+	s := &DoHNameServer{
+		address:     address,
+		httpClient:  httpClient,
+		ips:         make(map[string]record),
+		requests:    make(map[uint16]pendingRequest),
+		clientIP:    clientIP,
+		dohHost:     dohHost,
+		pub:         pubsub.NewService(),
+		name:        "DOH:" + dohHost,
+		pendingWait: make(map[string]struct{}),
 	}
-	c.cleanup = &task.Periodic{
+	s.cleanup = &task.Periodic{
 		Interval: time.Minute,
-		Execute:  c.Cleanup,
+		Execute:  s.Cleanup,
 	}
-	return c
+	return s
 }
 
-// New create a new dns.Client
-func NewDOHLocalClient(dohHost string, clientIP net.IP) *DOHClient {
-	c := &DOHClient{
-		resolver: doh.Resolver{
-			Host:  dohHost,
-			Class: doh.IN,
-		},
-		name:      "DOHLocal:" + dohHost,
-		dnsResult: make(map[string]*dohDNSResult),
-		pending:   make(map[string]*dohPendingRequest),
+func NewDoHLocalNameServer(dohHost string, clientIP net.IP) *DoHNameServer {
+
+	s := &DoHNameServer{
+		httpClient:  http.DefaultClient,
+		ips:         make(map[string]record),
+		requests:    make(map[uint16]pendingRequest),
+		clientIP:    clientIP,
+		dohHost:     dohHost,
+		pub:         pubsub.NewService(),
+		name:        "DOHLocal:" + dohHost,
+		pendingWait: make(map[string]struct{}),
 	}
-	c.cleanup = &task.Periodic{
+	s.cleanup = &task.Periodic{
 		Interval: time.Minute,
-		Execute:  c.Cleanup,
+		Execute:  s.Cleanup,
 	}
-	return c
+	return s
 }
 
-func isDOHServerError(err error) bool {
-	switch err {
-	case doh.ErrFormatError, doh.ErrServerFailure, doh.ErrNameError, doh.ErrNotImplemented, doh.ErrRefused:
-		return true
+func (s *DoHNameServer) Name() string {
+	return s.name
+}
+
+func (s *DoHNameServer) Cleanup() error {
+	now := time.Now()
+	s.Lock()
+	defer s.Unlock()
+
+	if len(s.ips) == 0 && len(s.requests) == 0 {
+		return newError("nothing to do. stopping...")
 	}
-	return false
+
+	for domain, record := range s.ips {
+		if record.A != nil && record.A.Expire.Before(now) {
+			record.A = nil
+		}
+		if record.AAAA != nil && record.AAAA.Expire.Before(now) {
+			record.AAAA = nil
+		}
+
+		if record.A == nil && record.AAAA == nil {
+			delete(s.ips, domain)
+		} else {
+			s.ips[domain] = record
+		}
+	}
+
+	if len(s.ips) == 0 {
+		s.ips = make(map[string]record)
+	}
+
+	for id, req := range s.requests {
+		if req.expire.Before(now) {
+			delete(s.requests, id)
+		}
+	}
+
+	if len(s.requests) == 0 {
+		s.requests = make(map[uint16]pendingRequest)
+	}
+
+	return nil
+}
+
+func (s *DoHNameServer) HandleResponse(payload []byte) {
+
+	var parser dnsmessage.Parser
+	header, err := parser.Start(payload)
+	if err != nil {
+		newError("failed to parse DNS response").Base(err).AtWarning().WriteToLog()
+		return
+	}
+	if err := parser.SkipAllQuestions(); err != nil {
+		newError("failed to skip questions in DNS response").Base(err).AtWarning().WriteToLog()
+		return
+	}
+
+	id := header.ID
+	s.Lock()
+	req, f := s.requests[id]
+	var elapsed time.Duration
+	if f {
+		elapsed = time.Since(req.expire.Add(time.Second * -8)) // expire is the started time plus 8 secs
+		delete(s.requests, id)
+	}
+	if _, isPending := s.pendingWait[req.domain]; isPending {
+		delete(s.pendingWait, req.domain)
+	}
+	s.Unlock()
+
+	if !f {
+		return
+	}
+
+	domain := req.domain
+	recType := req.recType
+
+	now := time.Now()
+	ipRecord := &IPRecord{
+		RCode:  header.RCode,
+		Expire: now.Add(time.Second * 600),
+	}
+
+L:
+	for {
+		header, err := parser.AnswerHeader()
+		if err != nil {
+			if err != dnsmessage.ErrSectionDone {
+				newError("failed to parse answer section for domain: ", domain).Base(err).WriteToLog()
+			}
+			break
+		}
+		ttl := header.TTL
+		if ttl == 0 {
+			ttl = 600
+		}
+		expire := now.Add(time.Duration(ttl) * time.Second)
+		if ipRecord.Expire.After(expire) {
+			ipRecord.Expire = expire
+		}
+
+		if header.Type != recType {
+			if err := parser.SkipAnswer(); err != nil {
+				newError("failed to skip answer").Base(err).WriteToLog()
+				break L
+			}
+			continue
+		}
+
+		switch header.Type {
+		case dnsmessage.TypeA:
+			ans, err := parser.AResource()
+			if err != nil {
+				newError("failed to parse A record for domain: ", domain).Base(err).WriteToLog()
+				break L
+			}
+			ipRecord.IP = append(ipRecord.IP, net.IPAddress(ans.A[:]))
+		case dnsmessage.TypeAAAA:
+			ans, err := parser.AAAAResource()
+			if err != nil {
+				newError("failed to parse A record for domain: ", domain).Base(err).WriteToLog()
+				break L
+			}
+			ipRecord.IP = append(ipRecord.IP, net.IPAddress(ans.AAAA[:]))
+		default:
+			if err := parser.SkipAnswer(); err != nil {
+				newError("failed to skip answer").Base(err).WriteToLog()
+				break L
+			}
+		}
+	}
+
+	var rec record
+	switch recType {
+	case dnsmessage.TypeA:
+		rec.A = ipRecord
+	case dnsmessage.TypeAAAA:
+		rec.AAAA = ipRecord
+	}
+
+	if len(ipRecord.IP) > 0 && (rec.A != nil || rec.AAAA != nil) {
+		s.updateIP(domain, rec, elapsed)
+	}
+}
+
+func (s *DoHNameServer) updateIP(domain string, newRec record, elapsed time.Duration) {
+	s.Lock()
+
+	var ips []net.Address
+	if newRec.A != nil {
+		ips, _ = newRec.A.getIPs()
+	} else if newRec.AAAA != nil {
+		ips, _ = newRec.AAAA.getIPs()
+	}
+	newError(s.name, " updating domain:", domain, " ", ips, " ", elapsed).AtWarning().WriteToLog()
+
+	// newError("updating IP records for domain:", domain).AtDebug().WriteToLog()
+	rec := s.ips[domain]
+
+	updated := false
+	if isNewer(rec.A, newRec.A) {
+		rec.A = newRec.A
+		updated = true
+	}
+	if isNewer(rec.AAAA, newRec.AAAA) {
+		rec.AAAA = newRec.AAAA
+		updated = true
+	}
+
+	if updated {
+		s.ips[domain] = rec
+		s.pub.Publish(domain, nil)
+	}
+
+	s.Unlock()
+	common.Must(s.cleanup.Start())
+}
+
+func (s *DoHNameServer) getMsgOptions() *dnsmessage.Resource {
+	if len(s.clientIP) == 0 {
+		return nil
+	}
+
+	var netmask int
+	var family uint16
+
+	if len(s.clientIP) == 4 {
+		family = 1
+		netmask = 24 // 24 for IPV4, 96 for IPv6
+	} else {
+		family = 2
+		netmask = 96
+	}
+
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint16(b[0:], family)
+	b[2] = byte(netmask)
+	b[3] = 0
+	switch family {
+	case 1:
+		ip := s.clientIP.To4().Mask(net.CIDRMask(netmask, net.IPv4len*8))
+		needLength := (netmask + 8 - 1) / 8 // division rounding up
+		b = append(b, ip[:needLength]...)
+	case 2:
+		ip := s.clientIP.Mask(net.CIDRMask(netmask, net.IPv6len*8))
+		needLength := (netmask + 8 - 1) / 8 // division rounding up
+		b = append(b, ip[:needLength]...)
+	}
+
+	const EDNS0SUBNET = 0x08
+
+	opt := new(dnsmessage.Resource)
+	common.Must(opt.Header.SetEDNS0(1350, 0xfe00, true))
+
+	opt.Body = &dnsmessage.OPTResource{
+		Options: []dnsmessage.Option{
+			{
+				Code: EDNS0SUBNET,
+				Data: b,
+			},
+		},
+	}
+
+	return opt
+}
+
+func (s *DoHNameServer) addPendingRequest(domain string, recType dnsmessage.Type) uint16 {
+
+	id := uint16(atomic.AddUint32(&s.reqID, 1))
+	s.Lock()
+	defer s.Unlock()
+
+	s.requests[id] = pendingRequest{
+		domain:  domain,
+		expire:  time.Now().Add(time.Second * 8),
+		recType: recType,
+	}
+
+	return id
+}
+
+func (s *DoHNameServer) buildMsgs(domain string, option IPOption) []*dnsmessage.Message {
+	qA := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName(domain),
+		Type:  dnsmessage.TypeA,
+		Class: dnsmessage.ClassINET,
+	}
+
+	qAAAA := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName(domain),
+		Type:  dnsmessage.TypeAAAA,
+		Class: dnsmessage.ClassINET,
+	}
+
+	var msgs []*dnsmessage.Message
+
+	if option.IPv4Enable {
+		msg := new(dnsmessage.Message)
+		msg.Header.ID = s.addPendingRequest(domain, dnsmessage.TypeA)
+		msg.Header.RecursionDesired = true
+		msg.Questions = []dnsmessage.Question{qA}
+		if opt := s.getMsgOptions(); opt != nil {
+			msg.Additionals = append(msg.Additionals, *opt)
+		}
+		msgs = append(msgs, msg)
+	}
+
+	if option.IPv6Enable {
+		msg := new(dnsmessage.Message)
+		msg.Header.ID = s.addPendingRequest(domain, dnsmessage.TypeAAAA)
+		msg.Header.RecursionDesired = true
+		msg.Questions = []dnsmessage.Question{qAAAA}
+		if opt := s.getMsgOptions(); opt != nil {
+			msg.Additionals = append(msg.Additionals, *opt)
+		}
+		msgs = append(msgs, msg)
+	}
+
+	return msgs
+}
+
+func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPOption) {
+	newError(s.name, " querying DNS for: ", domain).AtWarning().WriteToLog(session.ExportIDToError(ctx))
+
+	msgs := s.buildMsgs(domain, option)
+
+	for _, msg := range msgs {
+		b, _ := dns.PackMessage(msg)
+
+		udpCtx := context.Background()
+		if inbound := session.InboundFromContext(ctx); inbound != nil {
+			udpCtx = session.ContextWithInbound(udpCtx, inbound)
+		}
+		udpCtx = session.ContextWithContent(udpCtx, &session.Content{
+			Protocol: "https",
+		})
+		go func() {
+			resp, err := s.dohHTTPSContext(udpCtx, b.Bytes())
+			if err != nil {
+				newError("failed to HTTPS response").Base(err).AtWarning().WriteToLog()
+				return
+			}
+			s.HandleResponse(resp)
+		}()
+	}
+}
+
+func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte, error) {
+	url := fmt.Sprintf("https://%s/dns-query", s.dohHost)
+
+	body := bytes.NewBuffer(b)
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Accept", "application/dns-message")
+	req.Header.Add("Content-Type", "application/dns-message")
+
+	resp, err := s.httpClient.Do(req.WithContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("DOH HTTPS server returned with non-OK code %d", resp.StatusCode)
+		return nil, err
+	}
+
+	return ioutil.ReadAll(resp.Body)
+}
+
+func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.IP, error) {
+	s.RLock()
+	record, found := s.ips[domain]
+	s.RUnlock()
+
+	if !found {
+		return nil, errRecordNotFound
+	}
+
+	var ips []net.Address
+	var lastErr error
+	if option.IPv4Enable {
+		a, err := record.A.getIPs()
+		if err != nil {
+			lastErr = err
+		}
+		ips = append(ips, a...)
+	}
+
+	if option.IPv6Enable {
+		aaaa, err := record.AAAA.getIPs()
+		if err != nil {
+			lastErr = err
+		}
+		ips = append(ips, aaaa...)
+	}
+
+	if len(ips) > 0 {
+		return toNetIP(ips), nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	return nil, dns_feature.ErrEmptyResponse
+}
+
+func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option IPOption) ([]net.IP, error) {
+	// skip domain without any dot(.)
+	if strings.Index(domain, ".") == -1 {
+		return nil, newError("invalid domain name")
+	}
+
+	fqdn := Fqdn(domain)
+
+	ips, err := s.findIPsForDomain(fqdn, option)
+	if err != errRecordNotFound {
+		newError(s.name, " cache HIT ", domain, ips).Base(err).AtWarning().WriteToLog()
+		return ips, err
+	}
+
+	sub := s.pub.Subscribe(fqdn)
+	defer sub.Close()
+
+	s.RLock()
+	_, isPending := s.pendingWait[fqdn]
+	s.RUnlock()
+
+	if !isPending {
+		s.Lock()
+		s.pendingWait[fqdn] = struct{}{}
+		s.Unlock()
+		s.sendQuery(ctx, fqdn, option)
+	}
+
+	for {
+		ips, err := s.findIPsForDomain(fqdn, option)
+		if err != errRecordNotFound {
+			return ips, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-sub.Wait():
+		}
+	}
 }

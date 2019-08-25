@@ -67,7 +67,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 			server.clients = append(server.clients, NewLocalNameServer())
 		} else if address.Family().IsDomain() && strings.HasPrefix(address.Domain(), "DOHL_") {
 			dohHost := address.Domain()[5:]
-			server.clients = append(server.clients, NewDOHLocalClient(dohHost, server.clientIP))
+			server.clients = append(server.clients, NewDoHLocalNameServer(dohHost, server.clientIP))
 		} else if address.Family().IsDomain() && strings.HasPrefix(address.Domain(), "DOH_") {
 			// DOH_ prefix makes net.Address think it's a domain
 			// need to process the real address here.
@@ -94,7 +94,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 			idx := len(server.clients)
 			server.clients = append(server.clients, nil)
 			common.Must(core.RequireFeatures(ctx, func(d routing.Dispatcher) {
-				server.clients[idx] = NewDOHClient(dohdest, dohHost, d, server.clientIP)
+				server.clients[idx] = NewDoHNameServer(dohdest, dohHost, d, server.clientIP)
 			}))
 		} else {
 			dest := endpoint.AsDestination()
