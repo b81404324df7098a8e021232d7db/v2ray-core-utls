@@ -65,6 +65,9 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 		address := endpoint.Address.AsAddress()
 		if address.Family().IsDomain() && address.Domain() == "localhost" {
 			server.clients = append(server.clients, NewLocalNameServer())
+		} else if address.Family().IsDomain() && strings.HasPrefix(address.Domain(), "DOHL_") {
+			dohHost := address.Domain()[5:]
+			server.clients = append(server.clients, NewDOHLocalClient(dohHost, server.clientIP))
 		} else if address.Family().IsDomain() && strings.HasPrefix(address.Domain(), "DOH_") {
 			// DOH_ prefix makes net.Address think it's a domain
 			// need to process the real address here.

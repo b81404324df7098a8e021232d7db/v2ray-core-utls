@@ -67,7 +67,7 @@ type dohPendingRequest struct {
 type DOHClient struct {
 	sync.RWMutex
 	resolver doh.Resolver
-	DohHost  string
+	name     string
 
 	dnsResult map[string]*dohDNSResult
 	pending   map[string]*dohPendingRequest
@@ -373,12 +373,15 @@ func (c *DOHClient) Cleanup() error {
 }
 
 func (c *DOHClient) Name() string {
-	return "DOH:" + c.DohHost
+	return c.name
 }
 
 // New create a new dns.Client
 func NewDOHClient(address net.Destination, dohHost string, dispatcher routing.Dispatcher, clientIP net.IP) *DOHClient {
 
+	// Dispatched connection will be closed (interupted) after each request
+	// This makes DOH inefficient without a keeped-alive connection
+	// See: core/app/proxyman/outbound/handler.go:113
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		r, err := dispatcher.Dispatch(ctx, address)
 		if err != nil {
@@ -408,7 +411,25 @@ func NewDOHClient(address net.Destination, dohHost string, dispatcher routing.Di
 			Class:      doh.IN,
 			HTTPClient: httpClient,
 		},
-		DohHost:   dohHost,
+		name:      "DOH:" + dohHost,
+		dnsResult: make(map[string]*dohDNSResult),
+		pending:   make(map[string]*dohPendingRequest),
+	}
+	c.cleanup = &task.Periodic{
+		Interval: time.Minute,
+		Execute:  c.Cleanup,
+	}
+	return c
+}
+
+// New create a new dns.Client
+func NewDOHLocalClient(dohHost string, clientIP net.IP) *DOHClient {
+	c := &DOHClient{
+		resolver: doh.Resolver{
+			Host:  dohHost,
+			Class: doh.IN,
+		},
+		name:      "DOHLocal:" + dohHost,
 		dnsResult: make(map[string]*dohDNSResult),
 		pending:   make(map[string]*dohPendingRequest),
 	}
