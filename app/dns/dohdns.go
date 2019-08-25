@@ -450,20 +450,20 @@ func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.
 
 	var ips []net.Address
 	var lastErr error
-	if option.IPv4Enable && record.A != nil && record.A.RCode == dnsmessage.RCodeSuccess {
-		a, err := record.A.getIPs()
-		if err != nil {
-			lastErr = err
-		}
-		ips = append(ips, a...)
-	}
-
 	if option.IPv6Enable && record.AAAA != nil && record.AAAA.RCode == dnsmessage.RCodeSuccess {
 		aaaa, err := record.AAAA.getIPs()
 		if err != nil {
 			lastErr = err
 		}
 		ips = append(ips, aaaa...)
+	}
+
+	if option.IPv4Enable && record.A != nil && record.A.RCode == dnsmessage.RCodeSuccess {
+		a, err := record.A.getIPs()
+		if err != nil {
+			lastErr = err
+		}
+		ips = append(ips, a...)
 	}
 
 	if len(ips) > 0 {
