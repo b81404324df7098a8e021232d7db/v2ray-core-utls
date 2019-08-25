@@ -5,6 +5,7 @@ package dns
 import (
 	"context"
 	goerr "errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -260,6 +261,11 @@ func (c *DOHClient) dohLookupDual(ctx context.Context, domain string) (*dohDNSRe
 
 func (c *DOHClient) QueryIP(ctx context.Context, domain string, option IPOption) ([]net.IP, error) {
 
+	// skip domain without any dot(.)
+	if strings.Index(domain, ".") == -1 {
+		return nil, newError("invalid domain name")
+	}
+
 	if rec, err := c.getCache(domain, option); err == nil {
 		return rec, nil
 	}
@@ -343,6 +349,8 @@ func (c *DOHClient) Cleanup() error {
 		if record.A == nil && record.AAAA == nil {
 			delete(c.dnsResult, domain)
 			newError("DOH cache expired cleaned up ", domain).AtWarning().WriteToLog()
+		} else {
+			c.dnsResult[domain] = record
 		}
 	}
 
