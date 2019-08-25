@@ -126,6 +126,7 @@ func (s *DoHNameServer) Cleanup() error {
 		}
 
 		if record.A == nil && record.AAAA == nil {
+			newError(s.name, " cleanup ", domain).AtWarning().WriteToLog()
 			delete(s.ips, domain)
 		} else {
 			s.ips[domain] = record
@@ -144,6 +145,10 @@ func (s *DoHNameServer) Cleanup() error {
 
 	if len(s.requests) == 0 {
 		s.requests = make(map[uint16]pendingRequest)
+	}
+
+	if len(s.pendingWait) == 0 {
+		s.pendingWait = make(map[string]struct{})
 	}
 
 	return nil
@@ -183,9 +188,14 @@ func (s *DoHNameServer) HandleResponse(payload []byte) {
 	recType := req.recType
 
 	now := time.Now()
+	var ipRecExpire time.Time
+	if header.RCode != dnsmessage.RCodeSuccess {
+		ipRecExpire = now.Add(time.Second * 120)
+	}
+
 	ipRecord := &IPRecord{
 		RCode:  header.RCode,
-		Expire: now.Add(time.Second * 600),
+		Expire: ipRecExpire,
 	}
 
 L:
@@ -198,13 +208,11 @@ L:
 			break
 		}
 		ttl := header.TTL
-		if ttl == 0 {
+		if ttl < 600 {
 			ttl = 600
 		}
 		expire := now.Add(time.Duration(ttl) * time.Second)
-		if ipRecord.Expire.After(expire) {
-			ipRecord.Expire = expire
-		}
+		ipRecord.Expire = expire
 
 		if header.Type != recType {
 			if err := parser.SkipAnswer(); err != nil {
@@ -245,9 +253,7 @@ L:
 		rec.AAAA = ipRecord
 	}
 
-	if len(ipRecord.IP) > 0 && (rec.A != nil || rec.AAAA != nil) {
-		s.updateIP(domain, rec, elapsed)
-	}
+	s.updateIP(domain, rec, elapsed)
 }
 
 func (s *DoHNameServer) updateIP(domain string, newRec record, elapsed time.Duration) {
@@ -261,23 +267,17 @@ func (s *DoHNameServer) updateIP(domain string, newRec record, elapsed time.Dura
 	}
 	newError(s.name, " updating domain:", domain, " ", ips, " ", elapsed).AtWarning().WriteToLog()
 
-	// newError("updating IP records for domain:", domain).AtDebug().WriteToLog()
 	rec := s.ips[domain]
 
-	updated := false
 	if isNewer(rec.A, newRec.A) {
 		rec.A = newRec.A
-		updated = true
 	}
 	if isNewer(rec.AAAA, newRec.AAAA) {
 		rec.AAAA = newRec.AAAA
-		updated = true
 	}
 
-	if updated {
-		s.ips[domain] = rec
-		s.pub.Publish(domain, nil)
-	}
+	s.ips[domain] = rec
+	s.pub.Publish(domain, nil)
 
 	s.Unlock()
 	common.Must(s.cleanup.Start())
@@ -450,7 +450,7 @@ func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.
 
 	var ips []net.Address
 	var lastErr error
-	if option.IPv4Enable {
+	if option.IPv4Enable && record.A != nil && record.A.RCode == dnsmessage.RCodeSuccess {
 		a, err := record.A.getIPs()
 		if err != nil {
 			lastErr = err
@@ -458,7 +458,7 @@ func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.
 		ips = append(ips, a...)
 	}
 
-	if option.IPv6Enable {
+	if option.IPv6Enable && record.AAAA != nil && record.AAAA.RCode == dnsmessage.RCodeSuccess {
 		aaaa, err := record.AAAA.getIPs()
 		if err != nil {
 			lastErr = err
