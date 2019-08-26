@@ -25,9 +25,11 @@ import (
 	"v2ray.com/core/features/routing"
 )
 
+// DoHNameServer implimented DNS over HTTPS (RFC8484) Wire Format,
+// which is compatiable with traditional dns over udp(RFC1035),
+// thus most of the DOH implimentation is copied from udpns.go
 type DoHNameServer struct {
 	sync.RWMutex
-	address     net.Destination
 	ips         map[string]record
 	requests    map[uint16]pendingRequest
 	pendingWait map[string]struct{}
@@ -36,6 +38,7 @@ type DoHNameServer struct {
 	reqID       uint32
 	clientIP    net.IP
 	httpClient  *http.Client
+	dohURL      string
 	dohHost     string
 	name        string
 }
@@ -68,15 +71,15 @@ func NewDoHNameServer(address net.Destination, dohHost string, dispatcher routin
 		Timeout:   16 * time.Second,
 	}
 	s := &DoHNameServer{
-		address:     address,
 		httpClient:  httpClient,
 		ips:         make(map[string]record),
+		pendingWait: make(map[string]struct{}),
 		requests:    make(map[uint16]pendingRequest),
 		clientIP:    clientIP,
-		dohHost:     dohHost,
 		pub:         pubsub.NewService(),
 		name:        "DOH:" + dohHost,
-		pendingWait: make(map[string]struct{}),
+		dohHost:     dohHost,
+		dohURL:      fmt.Sprintf("https://%s/dns-query", dohHost),
 	}
 	s.cleanup = &task.Periodic{
 		Interval: time.Minute,
@@ -90,12 +93,13 @@ func NewDoHLocalNameServer(dohHost string, clientIP net.IP) *DoHNameServer {
 	s := &DoHNameServer{
 		httpClient:  http.DefaultClient,
 		ips:         make(map[string]record),
+		pendingWait: make(map[string]struct{}),
 		requests:    make(map[uint16]pendingRequest),
 		clientIP:    clientIP,
-		dohHost:     dohHost,
 		pub:         pubsub.NewService(),
-		name:        "DOHLocal:" + dohHost,
-		pendingWait: make(map[string]struct{}),
+		name:        "DOHL:" + dohHost,
+		dohHost:     dohHost,
+		dohURL:      fmt.Sprintf("https://%s/dns-query", dohHost),
 	}
 	s.cleanup = &task.Periodic{
 		Interval: time.Minute,
@@ -253,19 +257,12 @@ L:
 		rec.AAAA = ipRecord
 	}
 
-	s.updateIP(domain, rec, elapsed)
+	newError(s.name, " updating domain:", domain, " ", elapsed).AtWarning().WriteToLog()
+	s.updateIP(domain, rec)
 }
 
-func (s *DoHNameServer) updateIP(domain string, newRec record, elapsed time.Duration) {
+func (s *DoHNameServer) updateIP(domain string, newRec record) {
 	s.Lock()
-
-	var ips []net.Address
-	if newRec.A != nil {
-		ips, _ = newRec.A.getIPs()
-	} else if newRec.AAAA != nil {
-		ips, _ = newRec.AAAA.getIPs()
-	}
-	newError(s.name, " updating domain:", domain, " ", ips, " ", elapsed).AtWarning().WriteToLog()
 
 	rec := s.ips[domain]
 
@@ -394,15 +391,17 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 	for _, msg := range msgs {
 		b, _ := dns.PackMessage(msg)
 
-		udpCtx := context.Background()
+		dnsCtx := context.Background()
 		if inbound := session.InboundFromContext(ctx); inbound != nil {
-			udpCtx = session.ContextWithInbound(udpCtx, inbound)
+			dnsCtx = session.ContextWithInbound(dnsCtx, inbound)
 		}
-		udpCtx = session.ContextWithContent(udpCtx, &session.Content{
+		dnsCtx = session.ContextWithContent(dnsCtx, &session.Content{
 			Protocol: "https",
 		})
 		go func() {
-			resp, err := s.dohHTTPSContext(udpCtx, b.Bytes())
+			dnsCtx, cancel := context.WithTimeout(dnsCtx, 8*time.Second)
+			defer cancel()
+			resp, err := s.dohHTTPSContext(dnsCtx, b.Bytes())
 			if err != nil {
 				newError("failed to HTTPS response").Base(err).AtWarning().WriteToLog()
 				return
@@ -413,10 +412,9 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 }
 
 func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte, error) {
-	url := fmt.Sprintf("https://%s/dns-query", s.dohHost)
 
 	body := bytes.NewBuffer(b)
-	req, err := http.NewRequest("POST", url, body)
+	req, err := http.NewRequest("POST", s.dohURL, body)
 	if err != nil {
 		return nil, err
 	}
