@@ -185,6 +185,7 @@ func (s *DoHNameServer) HandleResponse(payload []byte) {
 	s.Unlock()
 
 	if !f {
+		// should never happeded
 		return
 	}
 
@@ -257,7 +258,7 @@ L:
 		rec.AAAA = ipRecord
 	}
 
-	newError(s.name, " updating domain:", domain, " ", elapsed).AtWarning().WriteToLog()
+	newError(s.name, " updating domain:", domain, " -> ", ipRecord.IP, " ", elapsed).AtWarning().WriteToLog()
 	s.updateIP(domain, rec)
 }
 
