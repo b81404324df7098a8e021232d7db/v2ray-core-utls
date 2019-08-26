@@ -66,24 +66,14 @@ func NewDoHNameServer(dest net.Destination, dohHost string, dispatcher routing.D
 		},
 	}
 
-	httpClient := &http.Client{
+	dispatchedClient := &http.Client{
 		Transport: tr,
 		Timeout:   16 * time.Second,
 	}
-	s := &DoHNameServer{
-		httpClient:  httpClient,
-		ips:         make(map[string]record),
-		pendingWait: make(map[string]struct{}),
-		requests:    make(map[uint16]pendingRequest),
-		clientIP:    clientIP,
-		pub:         pubsub.NewService(),
-		name:        "DOH:" + dohHost,
-		dohURL:      fmt.Sprintf("https://%s/dns-query", dohHost),
-	}
-	s.cleanup = &task.Periodic{
-		Interval: time.Minute,
-		Execute:  s.Cleanup,
-	}
+
+	s := NewDoHLocalNameServer(dohHost, clientIP)
+	s.httpClient = dispatchedClient
+	s.name = "DOH:" + dohHost
 	return s
 }
 
