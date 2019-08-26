@@ -47,6 +47,8 @@ func NewDoHNameServer(dest net.Destination, dohHost string, dispatcher routing.D
 	// Dispatched connection will be closed (interupted) after each request
 	// This makes DOH inefficient without a keeped-alive connection
 	// See: core/app/proxyman/outbound/handler.go:113
+	// Using mux improve the situation, but if the outbound is not vmess protocol,
+	// the connection problem persiststed.
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		link, err := dispatcher.Dispatch(ctx, dest)
 		if err != nil {
