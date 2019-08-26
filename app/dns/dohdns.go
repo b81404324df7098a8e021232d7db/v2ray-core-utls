@@ -47,24 +47,23 @@ func NewDoHNameServer(dest net.Destination, dohHost string, dispatcher routing.D
 	// Dispatched connection will be closed (interupted) after each request
 	// This makes DOH inefficient without a keeped-alive connection
 	// See: core/app/proxyman/outbound/handler.go:113
-	// Using mux improve the situation, but if the outbound is not vmess protocol,
-	// the connection problem persiststed.
-	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		link, err := dispatcher.Dispatch(ctx, dest)
-		if err != nil {
-			return nil, err
-		}
-		return net.NewConnection(
-			net.ConnectionInputMulti(link.Writer),
-			net.ConnectionOutputMulti(link.Reader),
-		), nil
-	}
-
+	// Using mux (https request wrapped in a stream layer) improves the situation,
+	// but if the outbound is not vmess protocol, the connection problem persiststed.
+	// Recommand to use NewDoHLocalNameServer if the DOH is performed on a normal network
 	tr := &http.Transport{
-		DialContext:         dial,
-		MaxIdleConns:        100,
+		MaxIdleConns:        10,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			link, err := dispatcher.Dispatch(ctx, dest)
+			if err != nil {
+				return nil, err
+			}
+			return net.NewConnection(
+				net.ConnectionInputMulti(link.Writer),
+				net.ConnectionOutputMulti(link.Reader),
+			), nil
+		},
 	}
 
 	httpClient := &http.Client{
