@@ -82,6 +82,9 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 					return 0
 				}
 				dohIP = ips[0].String()
+				if len(ips[0]) == net.IPv6len {
+					dohIP = fmt.Sprintf("[%s]", dohIP)
+				}
 			}
 
 			// rfc8484, DOH service only use port 443
