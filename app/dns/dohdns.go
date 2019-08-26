@@ -39,23 +39,22 @@ type DoHNameServer struct {
 	clientIP    net.IP
 	httpClient  *http.Client
 	dohURL      string
-	dohHost     string
 	name        string
 }
 
-func NewDoHNameServer(address net.Destination, dohHost string, dispatcher routing.Dispatcher, clientIP net.IP) *DoHNameServer {
+func NewDoHNameServer(dest net.Destination, dohHost string, dispatcher routing.Dispatcher, clientIP net.IP) *DoHNameServer {
 
 	// Dispatched connection will be closed (interupted) after each request
 	// This makes DOH inefficient without a keeped-alive connection
 	// See: core/app/proxyman/outbound/handler.go:113
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		r, err := dispatcher.Dispatch(ctx, address)
+		link, err := dispatcher.Dispatch(ctx, dest)
 		if err != nil {
 			return nil, err
 		}
 		return net.NewConnection(
-			net.ConnectionInputMulti(r.Writer),
-			net.ConnectionOutputMulti(r.Reader),
+			net.ConnectionInputMulti(link.Writer),
+			net.ConnectionOutputMulti(link.Reader),
 		), nil
 	}
 
@@ -78,7 +77,6 @@ func NewDoHNameServer(address net.Destination, dohHost string, dispatcher routin
 		clientIP:    clientIP,
 		pub:         pubsub.NewService(),
 		name:        "DOH:" + dohHost,
-		dohHost:     dohHost,
 		dohURL:      fmt.Sprintf("https://%s/dns-query", dohHost),
 	}
 	s.cleanup = &task.Periodic{
@@ -98,7 +96,6 @@ func NewDoHLocalNameServer(dohHost string, clientIP net.IP) *DoHNameServer {
 		clientIP:    clientIP,
 		pub:         pubsub.NewService(),
 		name:        "DOHL:" + dohHost,
-		dohHost:     dohHost,
 		dohURL:      fmt.Sprintf("https://%s/dns-query", dohHost),
 	}
 	s.cleanup = &task.Periodic{
