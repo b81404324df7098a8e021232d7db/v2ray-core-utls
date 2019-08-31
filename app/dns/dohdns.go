@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 	"v2ray.com/core/common"
+	"v2ray.com/core/common/dice"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol/dns"
 	"v2ray.com/core/common/session"
@@ -29,6 +30,8 @@ import (
 // thus most of the DOH implimentation is copied from udpns.go
 type DoHNameServer struct {
 	sync.RWMutex
+	dispatcher routing.Dispatcher
+	dohDests   []net.Destination
 	ips        map[string]record
 	pub        *pubsub.Service
 	cleanup    *task.Periodic
@@ -39,7 +42,12 @@ type DoHNameServer struct {
 	name       string
 }
 
-func NewDoHNameServer(dest net.Destination, dohHost string, dispatcher routing.Dispatcher, clientIP net.IP) *DoHNameServer {
+func NewDoHNameServer(dests []net.Destination, dohHost string, dispatcher routing.Dispatcher, clientIP net.IP) *DoHNameServer {
+
+	s := NewDoHLocalNameServer(dohHost, clientIP)
+	s.name = "DOH:" + dohHost
+	s.dispatcher = dispatcher
+	s.dohDests = dests
 
 	// Dispatched connection will be closed (interupted) after each request
 	// This makes DOH inefficient without a keeped-alive connection
@@ -51,16 +59,7 @@ func NewDoHNameServer(dest net.Destination, dohHost string, dispatcher routing.D
 		MaxIdleConns:        10,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			link, err := dispatcher.Dispatch(ctx, dest)
-			if err != nil {
-				return nil, err
-			}
-			return net.NewConnection(
-				net.ConnectionInputMulti(link.Writer),
-				net.ConnectionOutputMulti(link.Reader),
-			), nil
-		},
+		DialContext:         s.dohDispatchedDial,
 	}
 
 	dispatchedClient := &http.Client{
@@ -68,14 +67,11 @@ func NewDoHNameServer(dest net.Destination, dohHost string, dispatcher routing.D
 		Timeout:   16 * time.Second,
 	}
 
-	s := NewDoHLocalNameServer(dohHost, clientIP)
 	s.httpClient = dispatchedClient
-	s.name = "DOH:" + dohHost
 	return s
 }
 
 func NewDoHLocalNameServer(dohHost string, clientIP net.IP) *DoHNameServer {
-
 	s := &DoHNameServer{
 		httpClient: http.DefaultClient,
 		ips:        make(map[string]record),
@@ -93,6 +89,20 @@ func NewDoHLocalNameServer(dohHost string, clientIP net.IP) *DoHNameServer {
 
 func (s *DoHNameServer) Name() string {
 	return s.name
+}
+
+func (s *DoHNameServer) dohDispatchedDial(ctx context.Context, network, addr string) (net.Conn, error) {
+
+	dest := s.dohDests[dice.Roll(len(s.dohDests))]
+
+	link, err := s.dispatcher.Dispatch(ctx, dest)
+	if err != nil {
+		return nil, err
+	}
+	return net.NewConnection(
+		net.ConnectionInputMulti(link.Writer),
+		net.ConnectionOutputMulti(link.Reader),
+	), nil
 }
 
 func (s *DoHNameServer) Cleanup() error {
@@ -280,7 +290,7 @@ func (s *DoHNameServer) getMsgOptions() *dnsmessage.Resource {
 	return opt
 }
 
-func (s *DoHNameServer) newReqId() uint16 {
+func (s *DoHNameServer) newReqID() uint16 {
 	return uint16(atomic.AddUint32(&s.reqID, 1))
 }
 
@@ -309,7 +319,7 @@ func (s *DoHNameServer) buildMsgs(domain string, option IPOption) []*dohRequest 
 
 	if option.IPv4Enable {
 		msg := new(dnsmessage.Message)
-		msg.Header.ID = s.newReqId()
+		msg.Header.ID = s.newReqID()
 		msg.Header.RecursionDesired = true
 		msg.Questions = []dnsmessage.Question{qA}
 		if opt := s.getMsgOptions(); opt != nil {
@@ -325,7 +335,7 @@ func (s *DoHNameServer) buildMsgs(domain string, option IPOption) []*dohRequest 
 
 	if option.IPv6Enable {
 		msg := new(dnsmessage.Message)
-		msg.Header.ID = s.newReqId()
+		msg.Header.ID = s.newReqID()
 		msg.Header.RecursionDesired = true
 		msg.Questions = []dnsmessage.Question{qAAAA}
 		if opt := s.getMsgOptions(); opt != nil {
@@ -356,17 +366,17 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 		dnsCtx = session.ContextWithContent(dnsCtx, &session.Content{
 			Protocol: "https",
 		})
-		go func() {
+		go func(r *dohRequest) {
 			dnsCtx, cancel := context.WithTimeout(dnsCtx, 8*time.Second)
 			defer cancel()
-			b, _ := dns.PackMessage(req.msg)
+			b, _ := dns.PackMessage(r.msg)
 			resp, err := s.dohHTTPSContext(dnsCtx, b.Bytes())
 			if err != nil {
 				newError("failed to HTTPS response").Base(err).AtWarning().WriteToLog()
 				return
 			}
-			s.HandleResponse(req, resp)
-		}()
+			s.HandleResponse(r, resp)
+		}(req)
 	}
 }
 

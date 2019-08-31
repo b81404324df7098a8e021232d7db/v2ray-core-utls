@@ -74,6 +74,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 			dohHost := address.Domain()[4:]
 			dohAddr := net.ParseAddress(dohHost)
 			dohIP := dohHost
+			var dests []net.Destination
 
 			if dohAddr.Family().IsDomain() {
 				// resolve DOH server in advance
@@ -81,23 +82,28 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 				if err != nil || len(ips) == 0 {
 					return 0
 				}
-				dohIP = ips[0].String()
-				if len(ips[0]) == net.IPv6len {
-					dohIP = fmt.Sprintf("[%s]", dohIP)
+				for _, ip := range ips {
+					dohIP := ip.String()
+					if len(ip) == net.IPv6len {
+						dohIP = fmt.Sprintf("[%s]", dohIP)
+					}
+					dohdest, _ := net.ParseDestination(fmt.Sprintf("tcp:%s:443", dohIP))
+					dests = append(dests, dohdest)
 				}
-			}
-
-			// rfc8484, DOH service only use port 443
-			dohdest, err := net.ParseDestination(fmt.Sprintf("tcp:%s:443", dohIP))
-			if err != nil {
-				return 0
+			} else {
+				// rfc8484, DOH service only use port 443
+				dest, err := net.ParseDestination(fmt.Sprintf("tcp:%s:443", dohIP))
+				if err != nil {
+					return 0
+				}
+				dests = []net.Destination{dest}
 			}
 
 			// need the core dispatcher, register DOHClient at callback
 			idx := len(server.clients)
 			server.clients = append(server.clients, nil)
 			common.Must(core.RequireFeatures(ctx, func(d routing.Dispatcher) {
-				server.clients[idx] = NewDoHNameServer(dohdest, dohHost, d, server.clientIP)
+				server.clients[idx] = NewDoHNameServer(dests, dohHost, d, server.clientIP)
 			}))
 		} else {
 			dest := endpoint.AsDestination()
