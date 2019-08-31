@@ -21,7 +21,6 @@ import (
 	"v2ray.com/core/common/session"
 	"v2ray.com/core/common/signal/pubsub"
 	"v2ray.com/core/common/task"
-	dns_feature "v2ray.com/core/features/dns"
 	"v2ray.com/core/features/routing"
 )
 
@@ -30,16 +29,14 @@ import (
 // thus most of the DOH implimentation is copied from udpns.go
 type DoHNameServer struct {
 	sync.RWMutex
-	ips         map[string]record
-	requests    map[uint16]pendingRequest
-	pendingWait map[string]struct{}
-	pub         *pubsub.Service
-	cleanup     *task.Periodic
-	reqID       uint32
-	clientIP    net.IP
-	httpClient  *http.Client
-	dohURL      string
-	name        string
+	ips        map[string]record
+	pub        *pubsub.Service
+	cleanup    *task.Periodic
+	reqID      uint32
+	clientIP   net.IP
+	httpClient *http.Client
+	dohURL     string
+	name       string
 }
 
 func NewDoHNameServer(dest net.Destination, dohHost string, dispatcher routing.Dispatcher, clientIP net.IP) *DoHNameServer {
@@ -80,14 +77,12 @@ func NewDoHNameServer(dest net.Destination, dohHost string, dispatcher routing.D
 func NewDoHLocalNameServer(dohHost string, clientIP net.IP) *DoHNameServer {
 
 	s := &DoHNameServer{
-		httpClient:  http.DefaultClient,
-		ips:         make(map[string]record),
-		pendingWait: make(map[string]struct{}),
-		requests:    make(map[uint16]pendingRequest),
-		clientIP:    clientIP,
-		pub:         pubsub.NewService(),
-		name:        "DOHL:" + dohHost,
-		dohURL:      fmt.Sprintf("https://%s/dns-query", dohHost),
+		httpClient: http.DefaultClient,
+		ips:        make(map[string]record),
+		clientIP:   clientIP,
+		pub:        pubsub.NewService(),
+		name:       "DOHL:" + dohHost,
+		dohURL:     fmt.Sprintf("https://%s/dns-query", dohHost),
 	}
 	s.cleanup = &task.Periodic{
 		Interval: time.Minute,
@@ -105,7 +100,7 @@ func (s *DoHNameServer) Cleanup() error {
 	s.Lock()
 	defer s.Unlock()
 
-	if len(s.ips) == 0 && len(s.requests) == 0 {
+	if len(s.ips) == 0 {
 		return newError("nothing to do. stopping...")
 	}
 
@@ -129,24 +124,10 @@ func (s *DoHNameServer) Cleanup() error {
 		s.ips = make(map[string]record)
 	}
 
-	for id, req := range s.requests {
-		if req.expire.Before(now) {
-			delete(s.requests, id)
-		}
-	}
-
-	if len(s.requests) == 0 {
-		s.requests = make(map[uint16]pendingRequest)
-	}
-
-	if len(s.pendingWait) == 0 {
-		s.pendingWait = make(map[string]struct{})
-	}
-
 	return nil
 }
 
-func (s *DoHNameServer) HandleResponse(payload []byte) {
+func (s *DoHNameServer) HandleResponse(req *dohRequest, payload []byte) {
 
 	var parser dnsmessage.Parser
 	header, err := parser.Start(payload)
@@ -159,30 +140,10 @@ func (s *DoHNameServer) HandleResponse(payload []byte) {
 		return
 	}
 
-	id := header.ID
-	s.Lock()
-	req, f := s.requests[id]
-	var elapsed time.Duration
-	if f {
-		elapsed = time.Since(req.expire.Add(time.Second * -8)) // expire is the started time plus 8 secs
-		delete(s.requests, id)
-	}
-	if _, isPending := s.pendingWait[req.domain]; isPending {
-		delete(s.pendingWait, req.domain)
-	}
-	s.Unlock()
-
-	if !f {
-		// should never happeded
-		return
-	}
-
-	domain := req.domain
-	recType := req.recType
-
 	now := time.Now()
 	var ipRecExpire time.Time
 	if header.RCode != dnsmessage.RCodeSuccess {
+		// A default TTL, maybe a negtive cache
 		ipRecExpire = now.Add(time.Second * 120)
 	}
 
@@ -196,18 +157,19 @@ L:
 		header, err := parser.AnswerHeader()
 		if err != nil {
 			if err != dnsmessage.ErrSectionDone {
-				newError("failed to parse answer section for domain: ", domain).Base(err).WriteToLog()
+				newError("failed to parse answer section for domain: ", req.domain).Base(err).WriteToLog()
 			}
 			break
 		}
 		ttl := header.TTL
 		if ttl < 600 {
+			// at least 10 mins TTL
 			ttl = 600
 		}
 		expire := now.Add(time.Duration(ttl) * time.Second)
 		ipRecord.Expire = expire
 
-		if header.Type != recType {
+		if header.Type != req.reqType {
 			if err := parser.SkipAnswer(); err != nil {
 				newError("failed to skip answer").Base(err).WriteToLog()
 				break L
@@ -219,14 +181,14 @@ L:
 		case dnsmessage.TypeA:
 			ans, err := parser.AResource()
 			if err != nil {
-				newError("failed to parse A record for domain: ", domain).Base(err).WriteToLog()
+				newError("failed to parse A record for domain: ", req.domain).Base(err).WriteToLog()
 				break L
 			}
 			ipRecord.IP = append(ipRecord.IP, net.IPAddress(ans.A[:]))
 		case dnsmessage.TypeAAAA:
 			ans, err := parser.AAAAResource()
 			if err != nil {
-				newError("failed to parse A record for domain: ", domain).Base(err).WriteToLog()
+				newError("failed to parse A record for domain: ", req.domain).Base(err).WriteToLog()
 				break L
 			}
 			ipRecord.IP = append(ipRecord.IP, net.IPAddress(ans.AAAA[:]))
@@ -239,15 +201,16 @@ L:
 	}
 
 	var rec record
-	switch recType {
+	switch req.reqType {
 	case dnsmessage.TypeA:
 		rec.A = ipRecord
 	case dnsmessage.TypeAAAA:
 		rec.AAAA = ipRecord
 	}
 
-	newError(s.name, " updating domain:", domain, " -> ", ipRecord.IP, " ", elapsed).AtWarning().WriteToLog()
-	s.updateIP(domain, rec)
+	elapsed := time.Since(req.start)
+	newError(s.name, " updating domain:", req.domain, " -> ", ipRecord.IP, " ", elapsed).AtWarning().WriteToLog()
+	s.updateIP(req.domain, rec)
 }
 
 func (s *DoHNameServer) updateIP(domain string, newRec record) {
@@ -317,22 +280,18 @@ func (s *DoHNameServer) getMsgOptions() *dnsmessage.Resource {
 	return opt
 }
 
-func (s *DoHNameServer) addPendingRequest(domain string, recType dnsmessage.Type) uint16 {
-
-	id := uint16(atomic.AddUint32(&s.reqID, 1))
-	s.Lock()
-	defer s.Unlock()
-
-	s.requests[id] = pendingRequest{
-		domain:  domain,
-		expire:  time.Now().Add(time.Second * 8),
-		recType: recType,
-	}
-
-	return id
+func (s *DoHNameServer) newReqId() uint16 {
+	return uint16(atomic.AddUint32(&s.reqID, 1))
 }
 
-func (s *DoHNameServer) buildMsgs(domain string, option IPOption) []*dnsmessage.Message {
+type dohRequest struct {
+	reqType dnsmessage.Type
+	domain  string
+	start   time.Time
+	msg     *dnsmessage.Message
+}
+
+func (s *DoHNameServer) buildMsgs(domain string, option IPOption) []*dohRequest {
 	qA := dnsmessage.Question{
 		Name:  dnsmessage.MustNewName(domain),
 		Type:  dnsmessage.TypeA,
@@ -345,40 +304,50 @@ func (s *DoHNameServer) buildMsgs(domain string, option IPOption) []*dnsmessage.
 		Class: dnsmessage.ClassINET,
 	}
 
-	var msgs []*dnsmessage.Message
+	var reqs []*dohRequest
+	now := time.Now()
 
 	if option.IPv4Enable {
 		msg := new(dnsmessage.Message)
-		msg.Header.ID = s.addPendingRequest(domain, dnsmessage.TypeA)
+		msg.Header.ID = s.newReqId()
 		msg.Header.RecursionDesired = true
 		msg.Questions = []dnsmessage.Question{qA}
 		if opt := s.getMsgOptions(); opt != nil {
 			msg.Additionals = append(msg.Additionals, *opt)
 		}
-		msgs = append(msgs, msg)
+		reqs = append(reqs, &dohRequest{
+			reqType: dnsmessage.TypeA,
+			domain:  domain,
+			start:   now,
+			msg:     msg,
+		})
 	}
 
 	if option.IPv6Enable {
 		msg := new(dnsmessage.Message)
-		msg.Header.ID = s.addPendingRequest(domain, dnsmessage.TypeAAAA)
+		msg.Header.ID = s.newReqId()
 		msg.Header.RecursionDesired = true
 		msg.Questions = []dnsmessage.Question{qAAAA}
 		if opt := s.getMsgOptions(); opt != nil {
 			msg.Additionals = append(msg.Additionals, *opt)
 		}
-		msgs = append(msgs, msg)
+		reqs = append(reqs, &dohRequest{
+			reqType: dnsmessage.TypeAAAA,
+			domain:  domain,
+			start:   now,
+			msg:     msg,
+		})
 	}
 
-	return msgs
+	return reqs
 }
 
 func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPOption) {
 	newError(s.name, " querying DNS for: ", domain).AtWarning().WriteToLog(session.ExportIDToError(ctx))
 
-	msgs := s.buildMsgs(domain, option)
+	reqs := s.buildMsgs(domain, option)
 
-	for _, msg := range msgs {
-		b, _ := dns.PackMessage(msg)
+	for _, req := range reqs {
 
 		dnsCtx := context.Background()
 		if inbound := session.InboundFromContext(ctx); inbound != nil {
@@ -390,12 +359,13 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 		go func() {
 			dnsCtx, cancel := context.WithTimeout(dnsCtx, 8*time.Second)
 			defer cancel()
+			b, _ := dns.PackMessage(req.msg)
 			resp, err := s.dohHTTPSContext(dnsCtx, b.Bytes())
 			if err != nil {
 				newError("failed to HTTPS response").Base(err).AtWarning().WriteToLog()
 				return
 			}
-			s.HandleResponse(resp)
+			s.HandleResponse(req, resp)
 		}()
 	}
 }
@@ -461,7 +431,7 @@ func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.
 		return nil, lastErr
 	}
 
-	return nil, dns_feature.ErrEmptyResponse
+	return nil, errRecordNotFound
 }
 
 func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option IPOption) ([]net.IP, error) {
@@ -481,16 +451,7 @@ func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option IPOpt
 	sub := s.pub.Subscribe(fqdn)
 	defer sub.Close()
 
-	s.RLock()
-	_, isPending := s.pendingWait[fqdn]
-	s.RUnlock()
-
-	if !isPending {
-		s.Lock()
-		s.pendingWait[fqdn] = struct{}{}
-		s.Unlock()
-		s.sendQuery(ctx, fqdn, option)
-	}
+	s.sendQuery(ctx, fqdn, option)
 
 	for {
 		ips, err := s.findIPsForDomain(fqdn, option)
