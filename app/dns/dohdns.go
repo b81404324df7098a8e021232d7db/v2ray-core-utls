@@ -130,7 +130,7 @@ func (s *DoHNameServer) Cleanup() error {
 		}
 
 		if record.A == nil && record.AAAA == nil {
-			newError(s.name, " cleanup ", domain).AtWarning().WriteToLog()
+			newError(s.name, " cleanup ", domain).AtDebug().WriteToLog()
 			delete(s.ips, domain)
 		} else {
 			s.ips[domain] = record
@@ -226,7 +226,7 @@ L:
 	}
 
 	elapsed := time.Since(req.start)
-	newError(s.name, " updating domain:", req.domain, " -> ", ipRecord.IP, " ", elapsed).AtWarning().WriteToLog()
+	newError(s.name, " updating domain:", req.domain, " -> ", ipRecord.IP, " ", elapsed).AtInfo().WriteToLog()
 	s.updateIP(req.domain, rec)
 }
 
@@ -353,7 +353,7 @@ func (s *DoHNameServer) buildMsgs(domain string, option IPOption) []*dohRequest 
 }
 
 func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPOption) {
-	newError(s.name, " querying DNS for: ", domain).AtWarning().WriteToLog(session.ExportIDToError(ctx))
+	newError(s.name, " querying DNS for: ", domain).AtInfo().WriteToLog(session.ExportIDToError(ctx))
 
 	reqs := s.buildMsgs(domain, option)
 
@@ -454,7 +454,7 @@ func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option IPOpt
 
 	ips, err := s.findIPsForDomain(fqdn, option)
 	if err != errRecordNotFound {
-		newError(s.name, " cache HIT ", domain, ips).Base(err).AtWarning().WriteToLog()
+		newError(s.name, " cache HIT ", domain, ips).Base(err).AtDebug().WriteToLog()
 		return ips, err
 	}
 
