@@ -25,6 +25,13 @@ import (
 	"v2ray.com/core/features/routing"
 )
 
+type dohRequest struct {
+	reqType dnsmessage.Type
+	domain  string
+	start   time.Time
+	msg     *dnsmessage.Message
+}
+
 // DoHNameServer implimented DNS over HTTPS (RFC8484) Wire Format,
 // which is compatiable with traditional dns over udp(RFC1035),
 // thus most of the DOH implimentation is copied from udpns.go
@@ -292,13 +299,6 @@ func (s *DoHNameServer) getMsgOptions() *dnsmessage.Resource {
 
 func (s *DoHNameServer) newReqID() uint16 {
 	return uint16(atomic.AddUint32(&s.reqID, 1))
-}
-
-type dohRequest struct {
-	reqType dnsmessage.Type
-	domain  string
-	start   time.Time
-	msg     *dnsmessage.Message
 }
 
 func (s *DoHNameServer) buildMsgs(domain string, option IPOption) []*dohRequest {
