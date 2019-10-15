@@ -365,6 +365,10 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 		}
 		dnsCtx = session.ContextWithContent(dnsCtx, &session.Content{
 			Protocol: "https",
+			SniffingRequest: session.SniffingRequest{
+				// no need to sniff on our own request
+				Enabled: false,
+			},
 		})
 		go func(r *dohRequest) {
 			dnsCtx, cancel := context.WithTimeout(dnsCtx, 8*time.Second)
