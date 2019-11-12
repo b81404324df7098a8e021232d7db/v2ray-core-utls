@@ -395,7 +395,7 @@ func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte, 
 	req.Header.Add("Accept", "application/dns-message")
 	req.Header.Add("Content-Type", "application/dns-message")
 
-	resp, err := s.httpClient.Do(req.WithContext(ctx))
+	resp, err := s.httpClient.Do(req.WithContext(session.ContextWithMuxForced(ctx, true)))
 	if err != nil {
 		return nil, err
 	}

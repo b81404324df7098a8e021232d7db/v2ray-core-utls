@@ -246,11 +246,13 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
 		senderSettings.ProxySettings = ps
 	}
 
+	senderSettings.MultiplexSettings = &proxyman.MultiplexingConfig{
+		Enabled:     false,
+		Concurrency: 8,
+	}
 	if c.MuxSettings != nil && c.MuxSettings.Enabled {
-		senderSettings.MultiplexSettings = &proxyman.MultiplexingConfig{
-			Enabled:     true,
-			Concurrency: uint32(c.MuxSettings.GetConcurrency()),
-		}
+		senderSettings.MultiplexSettings.Enabled = true
+		senderSettings.MultiplexSettings.Concurrency = uint32(c.MuxSettings.GetConcurrency())
 	}
 
 	settings := []byte("{}")
