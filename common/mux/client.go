@@ -21,7 +21,7 @@ import (
 )
 
 type ClientManager struct {
-	Enabled bool
+	Enabled bool // wheather mux is enabled from user config
 	Picker  WorkerPicker
 }
 

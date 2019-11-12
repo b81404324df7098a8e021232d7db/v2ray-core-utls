@@ -59,9 +59,9 @@ func NewDoHNameServer(dests []net.Destination, dohHost string, dispatcher routin
 	// Dispatched connection will be closed (interupted) after each request
 	// This makes DOH inefficient without a keeped-alive connection
 	// See: core/app/proxyman/outbound/handler.go:113
-	// Using mux (https request wrapped in a stream layer) improves the situation,
-	// but if the outbound is not vmess protocol, the connection problem persiststed.
-	// Recommand to use NewDoHLocalNameServer if the DOH is performed on a normal network
+	// Using mux (https request wrapped in a stream layer) improves the situation.
+	// Recommand to use NewDoHLocalNameServer (DOHL:) if v2ray instance is running on
+	//  a normal network eg. the server side of v2ray
 	tr := &http.Transport{
 		MaxIdleConns:        10,
 		IdleConnTimeout:     90 * time.Second,
@@ -365,11 +365,9 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 		}
 		dnsCtx = session.ContextWithContent(dnsCtx, &session.Content{
 			Protocol: "https",
-			SniffingRequest: session.SniffingRequest{
-				// no need to sniff on our own request
-				Enabled: false,
-			},
 		})
+		// forced to use mux for DOH
+		dnsCtx = session.ContextWithMuxForced(dnsCtx, true)
 		go func(r *dohRequest) {
 			dnsCtx, cancel := context.WithTimeout(dnsCtx, 8*time.Second)
 			defer cancel()
@@ -395,7 +393,7 @@ func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte, 
 	req.Header.Add("Accept", "application/dns-message")
 	req.Header.Add("Content-Type", "application/dns-message")
 
-	resp, err := s.httpClient.Do(req.WithContext(session.ContextWithMuxForced(ctx, true)))
+	resp, err := s.httpClient.Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, err
 	}
