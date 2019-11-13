@@ -61,13 +61,14 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 	server.hosts = hosts
 
 	addNameServer := func(endpoint *net.Endpoint) int {
-
 		address := endpoint.Address.AsAddress()
 		if address.Family().IsDomain() && address.Domain() == "localhost" {
 			server.clients = append(server.clients, NewLocalNameServer())
+			newError("DNS: localhost inited").AtInfo().WriteToLog()
 		} else if address.Family().IsDomain() && strings.HasPrefix(address.Domain(), "DOHL_") {
 			dohHost := address.Domain()[5:]
 			server.clients = append(server.clients, NewDoHLocalNameServer(dohHost, server.clientIP))
+			newError("DNS: DOHLocal inited for https://", dohHost).AtInfo().WriteToLog()
 		} else if address.Family().IsDomain() && strings.HasPrefix(address.Domain(), "DOH_") {
 			// DOH_ prefix makes net.Address think it's a domain
 			// need to process the real address here.
@@ -104,6 +105,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 			server.clients = append(server.clients, nil)
 			common.Must(core.RequireFeatures(ctx, func(d routing.Dispatcher) {
 				server.clients[idx] = NewDoHNameServer(dests, dohHost, d, server.clientIP)
+				newError("DNS: DOHRemote inited for https://", dohHost).AtInfo().WriteToLog()
 			}))
 		} else {
 			dest := endpoint.AsDestination()
@@ -118,6 +120,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 					server.clients[idx] = NewClassicNameServer(dest, d, server.clientIP)
 				}))
 			}
+			newError("DNS: classic server inited ", dest.NetAddr()).AtInfo().WriteToLog()
 		}
 		return len(server.clients) - 1
 	}
