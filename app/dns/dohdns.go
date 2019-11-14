@@ -357,24 +357,40 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 
 	reqs := s.buildMsgs(domain, option)
 
+	var deadline time.Time
+	if d, ok := ctx.Deadline(); ok {
+		deadline = d
+	} else {
+		deadline = time.Now().Add(time.Second * 8)
+	}
+
 	for _, req := range reqs {
 
-		dnsCtx := context.Background()
-		if inbound := session.InboundFromContext(ctx); inbound != nil {
-			dnsCtx = session.ContextWithInbound(dnsCtx, inbound)
-		}
-		dnsCtx = session.ContextWithContent(dnsCtx, &session.Content{
-			Protocol: "https",
-		})
-		// forced to use mux for DOH
-		dnsCtx = session.ContextWithMuxForced(dnsCtx, true)
 		go func(r *dohRequest) {
-			dnsCtx, cancel := context.WithTimeout(dnsCtx, 8*time.Second)
+
+			// generate new context for each req, using same context
+			// may cause reqs all aborted if any one encounter an error
+			dnsCtx := context.Background()
+
+			// reserve internal dns server requested Inbound
+			if inbound := session.InboundFromContext(ctx); inbound != nil {
+				dnsCtx = session.ContextWithInbound(dnsCtx, inbound)
+			}
+
+			dnsCtx = session.ContextWithContent(dnsCtx, &session.Content{
+				Protocol: "https",
+			})
+
+			// forced to use mux for DOH
+			dnsCtx = session.ContextWithMuxForced(dnsCtx, true)
+
+			dnsCtx, cancel := context.WithDeadline(dnsCtx, deadline)
 			defer cancel()
+
 			b, _ := dns.PackMessage(r.msg)
 			resp, err := s.dohHTTPSContext(dnsCtx, b.Bytes())
 			if err != nil {
-				newError("failed to HTTPS response").Base(err).AtWarning().WriteToLog()
+				newError("failed to parse DOH response").Base(err).AtWarning().WriteToLog()
 				return
 			}
 			s.HandleResponse(r, resp)
