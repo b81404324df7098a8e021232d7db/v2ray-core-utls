@@ -99,7 +99,7 @@ func (s *ClassicNameServer) Cleanup() error {
 
 func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_proto.Packet) {
 
-	ipRec, err := parseResponse(nil, s.requests, packet.Payload.Bytes())
+	ipRec, err := parseResponse(packet.Payload.Bytes())
 	if err != nil {
 		newError(s.name, " fail to parse responsed DNS udp").AtError().WriteToLog()
 		return

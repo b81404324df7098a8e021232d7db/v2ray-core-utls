@@ -210,7 +210,7 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 				newError("failed to retrive response").Base(err).AtError().WriteToLog()
 				return
 			}
-			rec, err := parseResponse(r, nil, resp)
+			rec, err := parseResponse(resp)
 			if err != nil {
 				newError("failed to handle DOH response").Base(err).AtError().WriteToLog()
 				return

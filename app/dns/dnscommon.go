@@ -163,17 +163,10 @@ func buildReqMsgs(domain string, option IPOption, reqIDGen func() uint16, reqOpt
 	return reqs
 }
 
-/* parseResponse parse DNS answers from the returned payload
-
-UDP Mode: req = nil, reqMap = map[uint16]request
-In udp mode, *req is unknown when answer udp arrives, needs to parse the ID from header,
-and retrive the request obj from the pre stored reqMap
-
-DOH Mode: req = *dnsRequest, reqMap = nil
-DOH mode, the req is in same the context during calling the http client. */
-func parseResponse(req *dnsRequest, reqMap map[uint16]dnsRequest, payload []byte) (*IPRecord, error) {
+// parseResponse parse DNS answers from the returned payload
+func parseResponse(payload []byte) (*IPRecord, error) {
 	var parser dnsmessage.Parser
-	header, err := parser.Start(payload)
+	h, err := parser.Start(payload)
 	if err != nil {
 		return nil, newError("failed to parse DNS response").Base(err).AtWarning()
 	}
@@ -181,65 +174,42 @@ func parseResponse(req *dnsRequest, reqMap map[uint16]dnsRequest, payload []byte
 		return nil, newError("failed to skip questions in DNS response").Base(err).AtWarning()
 	}
 
-	if req == nil {
-		id := header.ID
-		if r, ok := reqMap[id]; ok {
-			req = &r
-		} else {
-			return nil, newError("fail to find dnsRequest with responsedID").AtError()
-		}
-	}
-
 	now := time.Now()
 	var ipRecExpire time.Time
-	if header.RCode != dnsmessage.RCodeSuccess {
+	if h.RCode != dnsmessage.RCodeSuccess {
 		// A default TTL, maybe a negtive cache
 		ipRecExpire = now.Add(time.Second * 120)
 	}
 
 	ipRecord := &IPRecord{
-		ReqID:  header.ID,
-		RCode:  header.RCode,
+		ReqID:  h.ID,
+		RCode:  h.RCode,
 		Expire: ipRecExpire,
 	}
 
 L:
 	for {
-		header, err := parser.AnswerHeader()
+		ah, err := parser.AnswerHeader()
 		if err != nil {
 			if err != dnsmessage.ErrSectionDone {
-				newError("failed to parse answer section for domain: ", req.domain).Base(err).WriteToLog()
+				newError("failed to parse answer section for domain: ", ah.Name.String()).Base(err).WriteToLog()
 			}
 			break
 		}
-		ttl := header.TTL
-		if ttl < 600 {
-			// at least 10 mins TTL
-			ttl = 600
-		}
-		expire := now.Add(time.Duration(ttl) * time.Second)
-		ipRecord.Expire = expire
+		newError("parsed name: ", ah.Name.String(), " type ", ah.Type).AtInfo().WriteToLog()
 
-		if header.Type != req.reqType {
-			if err := parser.SkipAnswer(); err != nil {
-				newError("failed to skip answer").Base(err).WriteToLog()
-				break L
-			}
-			continue
-		}
-
-		switch header.Type {
+		switch ah.Type {
 		case dnsmessage.TypeA:
 			ans, err := parser.AResource()
 			if err != nil {
-				newError("failed to parse A record for domain: ", req.domain).Base(err).WriteToLog()
+				newError("failed to parse A record for domain: ", ah.Name).Base(err).WriteToLog()
 				break L
 			}
 			ipRecord.IP = append(ipRecord.IP, net.IPAddress(ans.A[:]))
 		case dnsmessage.TypeAAAA:
 			ans, err := parser.AAAAResource()
 			if err != nil {
-				newError("failed to parse A record for domain: ", req.domain).Base(err).WriteToLog()
+				newError("failed to parse A record for domain: ", ah.Name).Base(err).WriteToLog()
 				break L
 			}
 			ipRecord.IP = append(ipRecord.IP, net.IPAddress(ans.AAAA[:]))
@@ -247,6 +217,17 @@ L:
 			if err := parser.SkipAnswer(); err != nil {
 				newError("failed to skip answer").Base(err).WriteToLog()
 				break L
+			}
+			continue
+		}
+
+		if ipRecord.Expire.IsZero() {
+			ttl := ah.TTL
+			if ttl < 600 {
+				// at least 10 mins TTL
+				ipRecord.Expire = now.Add(time.Minute * 10)
+			} else {
+				ipRecord.Expire = now.Add(time.Duration(ttl) * time.Second)
 			}
 		}
 	}
