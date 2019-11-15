@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -287,16 +286,12 @@ func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.
 
 // QueryIP is called from dns.Server->queryIPTimeout
 func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option IPOption) ([]net.IP, error) {
-	// skip domain without any dot(.)
-	if strings.Index(domain, ".") == -1 {
-		return nil, newError("invalid domain name")
-	}
 
 	fqdn := Fqdn(domain)
 
 	ips, err := s.findIPsForDomain(fqdn, option)
 	if err != errRecordNotFound {
-		newError(s.name, " cache HIT ", domain, ips).Base(err).AtDebug().WriteToLog()
+		newError(s.name, " cache HIT ", domain, " -> ", ips).Base(err).AtDebug().WriteToLog()
 		return ips, err
 	}
 

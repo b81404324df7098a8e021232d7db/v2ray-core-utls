@@ -246,8 +246,14 @@ func (s *Server) lookupIPInternal(domain string, option IPOption) ([]net.IP, err
 		return nil, newError("empty domain name")
 	}
 
+	// normalize the FQDN form query
 	if domain[len(domain)-1] == '.' {
 		domain = domain[:len(domain)-1]
+	}
+
+	// skip domain without any dot
+	if strings.Index(domain, ".") == -1 {
+		return nil, newError("invalid domain name")
 	}
 
 	ips := s.lookupStatic(domain, option, 0)

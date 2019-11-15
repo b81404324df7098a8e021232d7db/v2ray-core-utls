@@ -13,6 +13,13 @@ import (
 	dns_feature "v2ray.com/core/features/dns"
 )
 
+func Fqdn(domain string) string {
+	if len(domain) > 0 && domain[len(domain)-1] == '.' {
+		return domain
+	}
+	return domain + "."
+}
+
 type record struct {
 	A    *IPRecord
 	AAAA *IPRecord

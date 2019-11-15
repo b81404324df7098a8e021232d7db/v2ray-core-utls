@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
-	net "v2ray.com/core/common/net"
+	"v2ray.com/core/common/net"
 	v2net "v2ray.com/core/common/net"
 )
 
@@ -108,6 +108,27 @@ func Test_genEDNS0Options(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := genEDNS0Options(tt.args.clientIP); got == nil {
 				t.Errorf("genEDNS0Options() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFqdn(t *testing.T) {
+	type args struct {
+		domain string
+	}
+	tests := []struct {
+		name string
+		args args
+		want string
+	}{
+		{"with fqdn", args{"www.v2ray.com."}, "www.v2ray.com."},
+		{"without fqdn", args{"www.v2ray.com"}, "www.v2ray.com."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Fqdn(tt.args.domain); got != tt.want {
+				t.Errorf("Fqdn() = %v, want %v", got, tt.want)
 			}
 		})
 	}
