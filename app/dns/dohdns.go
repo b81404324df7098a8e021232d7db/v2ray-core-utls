@@ -226,7 +226,7 @@ L:
 	}
 
 	elapsed := time.Since(req.start)
-	newError(s.name, " updating domain:", req.domain, " -> ", ipRecord.IP, " ", elapsed).AtInfo().WriteToLog()
+	newError(s.name, " parsed domain:", req.domain, " -> ", ipRecord.IP, " ", elapsed).AtInfo().WriteToLog()
 	s.updateIP(req.domain, rec)
 }
 
