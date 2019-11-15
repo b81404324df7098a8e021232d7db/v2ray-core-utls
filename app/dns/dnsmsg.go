@@ -8,13 +8,52 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 	"v2ray.com/core/common"
+	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/net"
+	dns_feature "v2ray.com/core/features/dns"
+)
+
+type record struct {
+	A    *IPRecord
+	AAAA *IPRecord
+}
+
+type IPRecord struct {
+	ReqID  uint16
+	IP     []net.Address
+	Expire time.Time
+	RCode  dnsmessage.RCode
+}
+
+func (r *IPRecord) getIPs() ([]net.Address, error) {
+	if r == nil || r.Expire.Before(time.Now()) {
+		return nil, errRecordNotFound
+	}
+	if r.RCode != dnsmessage.RCodeSuccess {
+		return nil, dns_feature.RCodeError(r.RCode)
+	}
+	return r.IP, nil
+}
+
+func isNewer(baseRec *IPRecord, newRec *IPRecord) bool {
+	if newRec == nil {
+		return false
+	}
+	if baseRec == nil {
+		return true
+	}
+	return baseRec.Expire.Before(newRec.Expire)
+}
+
+var (
+	errRecordNotFound = errors.New("record not found")
 )
 
 type dnsRequest struct {
 	reqType dnsmessage.Type
 	domain  string
 	start   time.Time
+	expire  time.Time
 	msg     *dnsmessage.Message
 }
 
@@ -117,8 +156,15 @@ func buildReqMsgs(domain string, option IPOption, reqIDGen func() uint16, reqOpt
 	return reqs
 }
 
-func parseResponse(req *dnsRequest, payload []byte) (*IPRecord, error) {
+/* parseResponse parse DNS answers from the returned payload
 
+UDP Mode: req = nil, reqMap = map[uint16]request
+In udp mode, *req is unknown when answer udp arrives, needs to parse the ID from header,
+and retrive the request obj from the pre stored reqMap
+
+DOH Mode: req = *dnsRequest, reqMap = nil
+DOH mode, the req is in same the context during calling the http client. */
+func parseResponse(req *dnsRequest, reqMap map[uint16]dnsRequest, payload []byte) (*IPRecord, error) {
 	var parser dnsmessage.Parser
 	header, err := parser.Start(payload)
 	if err != nil {
@@ -126,6 +172,15 @@ func parseResponse(req *dnsRequest, payload []byte) (*IPRecord, error) {
 	}
 	if err := parser.SkipAllQuestions(); err != nil {
 		return nil, newError("failed to skip questions in DNS response").Base(err).AtWarning()
+	}
+
+	if req == nil {
+		id := header.ID
+		if r, ok := reqMap[id]; ok {
+			req = &r
+		} else {
+			return nil, newError("fail to find dnsRequest with responsedID").AtError()
+		}
 	}
 
 	now := time.Now()
@@ -136,6 +191,7 @@ func parseResponse(req *dnsRequest, payload []byte) (*IPRecord, error) {
 	}
 
 	ipRecord := &IPRecord{
+		ReqID:  header.ID,
 		RCode:  header.RCode,
 		Expire: ipRecExpire,
 	}
