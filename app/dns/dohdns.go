@@ -144,7 +144,7 @@ func (s *DoHNameServer) Cleanup() error {
 	return nil
 }
 
-func (s *DoHNameServer) HandleResponse(req *dohRequest, payload []byte) {
+func (s *DoHNameServer) handleResponse(req *dohRequest, payload []byte) {
 
 	var parser dnsmessage.Parser
 	header, err := parser.Start(payload)
@@ -217,33 +217,34 @@ L:
 		}
 	}
 
-	var rec record
-	switch req.reqType {
-	case dnsmessage.TypeA:
-		rec.A = ipRecord
-	case dnsmessage.TypeAAAA:
-		rec.AAAA = ipRecord
-	}
-
 	elapsed := time.Since(req.start)
-	newError(s.name, " parsed domain:", req.domain, " -> ", ipRecord.IP, " ", elapsed).AtInfo().WriteToLog()
-	s.updateIP(req.domain, rec)
+	newError(s.name, " got answere: ", req.domain, " ", req.reqType, " -> ", ipRecord.IP, " ", elapsed).AtInfo().WriteToLog()
+	s.updateIP(req.domain, ipRecord, req.reqType)
 }
 
-func (s *DoHNameServer) updateIP(domain string, newRec record) {
+func (s *DoHNameServer) updateIP(domain string, ipRec *IPRecord, reqType dnsmessage.Type) {
 	s.Lock()
 
 	rec := s.ips[domain]
+	updated := false
 
-	if isNewer(rec.A, newRec.A) {
-		rec.A = newRec.A
-	}
-	if isNewer(rec.AAAA, newRec.AAAA) {
-		rec.AAAA = newRec.AAAA
+	switch reqType {
+	case dnsmessage.TypeA:
+		if isNewer(rec.A, ipRec) {
+			rec.A = ipRec
+			updated = true
+		}
+	case dnsmessage.TypeAAAA:
+		if isNewer(rec.AAAA, ipRec) {
+			rec.AAAA = ipRec
+			updated = true
+		}
 	}
 
-	s.ips[domain] = rec
-	s.pub.Publish(domain, nil)
+	if updated {
+		s.ips[domain] = rec
+		s.pub.Publish(domain, nil)
+	}
 
 	s.Unlock()
 	common.Must(s.cleanup.Start())
@@ -353,7 +354,7 @@ func (s *DoHNameServer) buildMsgs(domain string, option IPOption) []*dohRequest 
 }
 
 func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPOption) {
-	newError(s.name, " querying DNS for: ", domain).AtInfo().WriteToLog(session.ExportIDToError(ctx))
+	newError(s.name, " querying: ", domain).AtInfo().WriteToLog(session.ExportIDToError(ctx))
 
 	reqs := s.buildMsgs(domain, option)
 
@@ -393,7 +394,7 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 				newError("failed to parse DOH response").Base(err).AtWarning().WriteToLog()
 				return
 			}
-			s.HandleResponse(r, resp)
+			s.handleResponse(r, resp)
 		}(req)
 	}
 }
@@ -462,6 +463,7 @@ func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.
 	return nil, errRecordNotFound
 }
 
+// QueryIP is called from dns.Server->queryIPTimeout
 func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option IPOption) ([]net.IP, error) {
 	// skip domain without any dot(.)
 	if strings.Index(domain, ".") == -1 {
