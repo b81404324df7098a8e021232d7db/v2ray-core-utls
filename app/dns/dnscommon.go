@@ -196,7 +196,6 @@ L:
 			}
 			break
 		}
-		newError("parsed name: ", ah.Name.String(), " type ", ah.Type).AtInfo().WriteToLog()
 
 		switch ah.Type {
 		case dnsmessage.TypeA:
