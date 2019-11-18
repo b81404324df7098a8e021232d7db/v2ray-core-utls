@@ -199,7 +199,7 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 			})
 
 			// forced to use mux for DOH
-			dnsCtx = session.ContextWithMuxForced(dnsCtx, true)
+			dnsCtx = session.ContextWithMuxPrefered(dnsCtx, true)
 
 			dnsCtx, cancel := context.WithDeadline(dnsCtx, deadline)
 			defer cancel()
