@@ -10,6 +10,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/miekg/dns"
 	"golang.org/x/net/dns/dnsmessage"
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/net"
 	v2net "v2ray.com/core/common/net"
 )
@@ -19,58 +20,62 @@ func Test_parseResponse(t *testing.T) {
 		payload []byte
 	}
 
-	ans1 := new(dns.Msg)
-	ans1.Id = 0
-	ans1b, _ := ans1.Pack()
+	var p [][]byte
 
-	ans2 := new(dns.Msg)
-	ans2.Id = 1
-	ans2r, _ := dns.NewRR("google.com. IN A 8.8.8.8")
-	ans2.Answer = append(ans2.Answer, ans2r)
-	ans2r, _ = dns.NewRR("google.com. IN A 8.8.4.4")
-	ans2.Answer = append(ans2.Answer, ans2r)
-	ans2b, _ := ans2.Pack()
+	ans := new(dns.Msg)
+	ans.Id = 0
+	p = append(p, common.Must2(ans.Pack()).([]byte))
 
-	ans3 := new(dns.Msg)
-	ans3.Id = 2
-	ans3r, _ := dns.NewRR("google.com. IN CNAME m.test.google.com")
-	ans3.Answer = append(ans3.Answer, ans3r)
-	ans3r, _ = dns.NewRR("google.com. IN CNAME test.google.com")
-	ans3.Answer = append(ans3.Answer, ans3r)
-	ans3r, _ = dns.NewRR("google.com. IN AAAA 2001::123:8888")
-	ans3.Answer = append(ans3.Answer, ans3r)
-	ans3r, _ = dns.NewRR("google.com. IN AAAA 2001::123:8844")
-	ans3.Answer = append(ans3.Answer, ans3r)
-	ans3b, _ := ans3.Pack()
+	p = append(p, []byte{})
+
+	ans = new(dns.Msg)
+	ans.Id = 1
+	ans.Answer = append(ans.Answer,
+		common.Must2(dns.NewRR("google.com. IN CNAME m.test.google.com")).(dns.RR),
+		common.Must2(dns.NewRR("google.com. IN CNAME fake.google.com")).(dns.RR),
+		common.Must2(dns.NewRR("google.com. IN A 8.8.8.8")).(dns.RR),
+		common.Must2(dns.NewRR("google.com. IN A 8.8.4.4")).(dns.RR),
+	)
+	p = append(p, common.Must2(ans.Pack()).([]byte))
+
+	ans = new(dns.Msg)
+	ans.Id = 2
+	ans.Answer = append(ans.Answer,
+		common.Must2(dns.NewRR("google.com. IN CNAME m.test.google.com")).(dns.RR),
+		common.Must2(dns.NewRR("google.com. IN CNAME fake.google.com")).(dns.RR),
+		common.Must2(dns.NewRR("google.com. IN CNAME m.test.google.com")).(dns.RR),
+		common.Must2(dns.NewRR("google.com. IN CNAME test.google.com")).(dns.RR),
+		common.Must2(dns.NewRR("google.com. IN AAAA 2001::123:8888")).(dns.RR),
+		common.Must2(dns.NewRR("google.com. IN AAAA 2001::123:8844")).(dns.RR),
+	)
+	p = append(p, common.Must2(ans.Pack()).([]byte))
 
 	tests := []struct {
 		name    string
-		args    args
 		want    *IPRecord
 		wantErr bool
 	}{
-		{"empty", args{ans1b},
+		{"empty",
 			&IPRecord{0, []v2net.Address(nil), time.Time{}, dnsmessage.RCodeSuccess},
 			false,
 		},
-		{"google.com", args{ans2b},
+		{"error",
+			nil,
+			true,
+		},
+		{"a record",
 			&IPRecord{1, []v2net.Address{v2net.ParseAddress("8.8.8.8"), v2net.ParseAddress("8.8.4.4")},
 				time.Time{}, dnsmessage.RCodeSuccess},
 			false,
 		},
-		{"google.com ipv6", args{ans3b},
+		{"aaaa record",
 			&IPRecord{2, []v2net.Address{v2net.ParseAddress("2001::123:8888"), v2net.ParseAddress("2001::123:8844")}, time.Time{}, dnsmessage.RCodeSuccess},
 			false,
 		},
-		{"error", args{
-			[]byte{}},
-			nil,
-			true,
-		},
 	}
-	for _, tt := range tests {
+	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseResponse(tt.args.payload)
+			got, err := parseResponse(p[i])
 			if (err != nil) != tt.wantErr {
 				t.Errorf("handleResponse() error = %v, wantErr %v", err, tt.wantErr)
 				return
