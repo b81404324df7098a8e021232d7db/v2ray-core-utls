@@ -45,7 +45,7 @@ func Client(c net.Conn, config *tls.Config) net.Conn {
 	return &conn{Conn: tlsConn}
 }
 
-func copyConfig(c *tls.Config) *utls.Config {
+func UcopyConfig(c *tls.Config) *utls.Config {
 	return &utls.Config{
 		NextProtos:         c.NextProtos,
 		ServerName:         c.ServerName,
@@ -56,7 +56,7 @@ func copyConfig(c *tls.Config) *utls.Config {
 }
 
 func UClient(c net.Conn, config *tls.Config) net.Conn {
-	uConfig := copyConfig(config)
+	uConfig := UcopyConfig(config)
 	return utls.Client(c, uConfig)
 }
 
