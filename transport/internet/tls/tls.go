@@ -51,13 +51,15 @@ func UcopyConfig(c *tls.Config) *utls.Config {
 		ServerName:         c.ServerName,
 		InsecureSkipVerify: c.InsecureSkipVerify,
 		MinVersion:         utls.VersionTLS12,
-		MaxVersion:         utls.VersionTLS12,
+		MaxVersion:         utls.VersionTLS13,
 	}
 }
 
 func UClient(c net.Conn, config *tls.Config) net.Conn {
 	uConfig := UcopyConfig(config)
-	return utls.Client(c, uConfig)
+	tlsConn := utls.UClient(c, uConfig, utls.HelloChrome_Auto)
+	tlsConn.Handshake()
+	return tlsConn
 }
 
 // Server initiates a TLS server handshake on the given connection.
